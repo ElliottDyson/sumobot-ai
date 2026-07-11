@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .contracts import ACTION_ORDER
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -52,11 +55,13 @@ class RobotConfig:
     wheel_radius_m: float
     wheel_width_m: float
     wheel_mass_kg: float
-    wheelbase_m: float
+    wheel_axle_x_m: float
     track_m: float
+    skid_x_m: float
+    skid_radius_m: float
     max_wheel_speed_rad_s: float
     max_wheel_torque_nm: float
-    action_order: tuple[str, str, str, str]
+    action_order: tuple[str, str]
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> RobotConfig:
@@ -66,8 +71,10 @@ class RobotConfig:
             wheel_radius_m=float(data["wheel_radius_m"]),
             wheel_width_m=float(data["wheel_width_m"]),
             wheel_mass_kg=float(data["wheel_mass_kg"]),
-            wheelbase_m=float(data["wheelbase_m"]),
+            wheel_axle_x_m=float(data["wheel_axle_x_m"]),
             track_m=float(data["track_m"]),
+            skid_x_m=float(data["skid_x_m"]),
+            skid_radius_m=float(data["skid_radius_m"]),
             max_wheel_speed_rad_s=float(data["max_wheel_speed_rad_s"]),
             max_wheel_torque_nm=float(data["max_wheel_torque_nm"]),
             action_order=tuple(str(item) for item in data["action_order"]),
@@ -78,20 +85,22 @@ class RobotConfig:
             result.wheel_radius_m,
             result.wheel_width_m,
             result.wheel_mass_kg,
-            result.wheelbase_m,
             result.track_m,
+            result.skid_radius_m,
             result.max_wheel_speed_rad_s,
             result.max_wheel_torque_nm,
         )
         if min(numeric) <= 0:
             raise ValueError("robot dimensions, masses, limits, and speeds must be positive")
-        expected = ("front_left", "front_right", "rear_left", "rear_right")
-        if result.action_order != expected:
-            raise ValueError(f"robot.action_order must be {list(expected)}")
-        if result.wheelbase_m > result.chassis_size_m[0]:
-            raise ValueError("robot.wheelbase_m cannot exceed chassis x size")
-        if result.track_m < result.chassis_size_m[1]:
-            raise ValueError("robot.track_m must span at least the chassis y size")
+        if not all(math.isfinite(value) for value in (*numeric, result.wheel_axle_x_m, result.skid_x_m)):
+            raise ValueError("robot geometry, masses, limits, and speeds must be finite")
+        if result.action_order != ACTION_ORDER:
+            raise ValueError(f"robot.action_order must be {list(ACTION_ORDER)}")
+        half_length = result.chassis_size_m[0] / 2.0
+        if abs(result.wheel_axle_x_m) > half_length:
+            raise ValueError("robot.wheel_axle_x_m must lie within the chassis length")
+        if abs(result.skid_x_m) + result.skid_radius_m > half_length + 1e-9:
+            raise ValueError("robot skid footprint must lie within the chassis length")
         return result
 
 
@@ -142,6 +151,28 @@ class PhysicsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MatchConfig:
+    inactivity_timeout_s: float
+    movement_speed_threshold_m_s: float
+    movement_confirmation_s: float
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any], *, episode_seconds: float) -> MatchConfig:
+        result = cls(
+            inactivity_timeout_s=float(data["inactivity_timeout_s"]),
+            movement_speed_threshold_m_s=float(data["movement_speed_threshold_m_s"]),
+            movement_confirmation_s=float(data["movement_confirmation_s"]),
+        )
+        if not 0 < result.inactivity_timeout_s < episode_seconds:
+            raise ValueError("match.inactivity_timeout_s must be between zero and the episode duration")
+        if result.movement_speed_threshold_m_s <= 0:
+            raise ValueError("match.movement_speed_threshold_m_s must be positive")
+        if not 0 < result.movement_confirmation_s < result.inactivity_timeout_s:
+            raise ValueError("match.movement_confirmation_s must be positive and shorter than inactivity timeout")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class InitializationConfig:
     red_position_m: tuple[float, float, float]
     red_yaw_rad: float
@@ -172,6 +203,7 @@ class ArenaConfig:
     board: BoardConfig
     robot: RobotConfig
     physics: PhysicsConfig
+    match: MatchConfig
     initialization: InitializationConfig
     domain_randomization: Mapping[str, tuple[float, float]]
 
@@ -182,16 +214,18 @@ class ArenaConfig:
         for name, (low, high) in dr.items():
             if low > high:
                 raise ValueError(f"domain_randomization.{name} has low > high")
+        physics = PhysicsConfig.from_mapping(_mapping(data["physics"], "physics"))
         result = cls(
             version=int(data["version"]),
             name=str(data["name"]),
             board=BoardConfig.from_mapping(_mapping(data["board"], "board")),
             robot=RobotConfig.from_mapping(_mapping(data["robot"], "robot")),
-            physics=PhysicsConfig.from_mapping(_mapping(data["physics"], "physics")),
+            physics=physics,
+            match=MatchConfig.from_mapping(_mapping(data["match"], "match"), episode_seconds=physics.episode_seconds),
             initialization=InitializationConfig.from_mapping(_mapping(data["initialization"], "initialization")),
             domain_randomization=dr,
         )
-        if result.version != 1:
+        if result.version != 2:
             raise ValueError(f"unsupported arena config version: {result.version}")
         half_x, half_y = (value / 2 for value in result.board.size_m)
         initial_positions = (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from io import BytesIO
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,8 +15,82 @@ from ..rewards import RewardSpec, evaluate_reward
 from ..state import BLUE, DRAW, RED, ArenaState, ArenaTransition
 
 if TYPE_CHECKING:
+    from torch.utils.tensorboard import SummaryWriter
+
     from ..sim.newton_backend import NewtonSumoArena
     from .cpo import TransplantableCPOActorCritic
+
+
+def validation_capture_steps(
+    max_episode_steps: int,
+    control_hz: int,
+    video_fps: int,
+    video_max_frames: int,
+) -> frozenset[int]:
+    """Return post-step frame indices, including the match-time terminal frame."""
+    if min(max_episode_steps, control_hz, video_fps, video_max_frames) <= 0:
+        raise ValueError("validation timing and video settings must be positive")
+    if video_fps > control_hz or control_hz % video_fps:
+        raise ValueError("validation_video_fps must divide the control frequency")
+    interval = control_hz // video_fps
+    steps = list(range(interval, max_episode_steps + 1, interval))
+    if not steps or steps[-1] != max_episode_steps:
+        steps.append(max_episode_steps)
+    required_frames = 1 + len(steps)  # Include the reset frame at t=0.
+    if video_max_frames < required_frames:
+        raise ValueError(
+            f"validation_video_max_frames={video_max_frames} truncates the match; "
+            f"at least {required_frames} frames are required"
+        )
+    return frozenset(steps)
+
+
+def encode_validation_gif(video: torch.Tensor, fps: int) -> bytes:
+    """Encode a TensorBoard-compatible GIF with explicit, non-zero frame timing."""
+    if video.dtype != torch.uint8 or video.ndim != 5 or video.shape[0] != 1 or video.shape[2] not in (1, 3, 4):
+        raise ValueError("video must be uint8 with shape (1, T, C, H, W) and 1, 3, or 4 channels")
+    if fps <= 0:
+        raise ValueError("video fps must be positive")
+    frame_duration_ms = max(10, round(1000 / fps))
+    array = video[0].permute(0, 2, 3, 1).contiguous().cpu().numpy()
+    frames = [Image.fromarray(frame.squeeze(-1) if frame.shape[-1] == 1 else frame) for frame in array]
+    if not frames:
+        raise ValueError("video must contain at least one frame")
+    output = BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=frame_duration_ms,
+        loop=0,
+        optimize=False,
+        disposal=2,
+    )
+    return output.getvalue()
+
+
+def add_tensorboard_video(
+    writer: SummaryWriter,
+    tag: str,
+    video: torch.Tensor,
+    global_step: int,
+    *,
+    fps: int,
+) -> None:
+    """Write an animated GIF directly, avoiding MoviePy/ImageIO timing incompatibilities."""
+    from tensorboard.compat.proto.summary_pb2 import Summary
+
+    encoded = encode_validation_gif(video, fps)
+    _, _, channels, height, width = video.shape
+    image = Summary.Image(
+        height=height,
+        width=width,
+        colorspace=channels,
+        encoded_image_string=encoded,
+    )
+    summary = Summary(value=[Summary.Value(tag=tag, image=image)])
+    writer._get_file_writer().add_summary(summary, global_step)
 
 
 def _yaw_from_xyzw(quaternion: np.ndarray) -> float:
@@ -74,6 +149,8 @@ def render_top_down(
         nose = to_pixel(x + cosine * display_length, y + sine * display_length)
         draw.line((center, nose), fill=(255, 245, 100), width=2)
     draw.text((14, 13), f"t={float(state.time_remaining_s[arena_index]):5.2f}s", fill=(15, 15, 15))
+    red_idle, blue_idle = (float(value) for value in state.stationary_time_s[arena_index])
+    draw.text((14, 29), f"idle R={red_idle:4.1f}s B={blue_idle:4.1f}s", fill=(15, 15, 15))
     return np.asarray(image).copy()
 
 
@@ -102,6 +179,12 @@ class LeaderValidation:
         self.seed = seed
         self.video_fps = video_fps
         self.video_max_frames = video_max_frames
+        self.capture_steps = validation_capture_steps(
+            arena_config.physics.max_episode_steps,
+            arena_config.physics.control_hz,
+            video_fps,
+            video_max_frames,
+        )
 
     @torch.no_grad()
     def run(
@@ -118,10 +201,11 @@ class LeaderValidation:
         device = state.position.device
         active = torch.ones(count, dtype=torch.bool, device=device)
         returns = torch.zeros(count, 2, dtype=torch.float32, device=device)
+        component_returns: dict[str, torch.Tensor] = {}
         lengths = torch.zeros(count, dtype=torch.int32, device=device)
         outcomes = torch.full((count,), DRAW, dtype=torch.int64, device=device)
+        ending_counts = torch.zeros(3, dtype=torch.int64, device=device)
         frames = [render_top_down(state, self.arena_config)]
-        frame_interval = max(1, round(self.arena_config.physics.control_hz / self.video_fps))
 
         for step in range(self.arena_config.physics.max_episode_steps):
             red_observation = build_teacher_observation(state, self.arena.domain, RED).values
@@ -138,12 +222,23 @@ class LeaderValidation:
                 truncated=physics.truncated,
                 winner=physics.winner,
             )
-            reward = evaluate_reward(self.reward_spec, transition).total
+            reward_result = evaluate_reward(self.reward_spec, transition)
+            reward = reward_result.total
             returns += reward * active.unsqueeze(-1)
+            for name, value in reward_result.components.items():
+                component_returns[name] = component_returns.get(
+                    name, torch.zeros_like(returns)
+                ) + value * active.unsqueeze(-1)
             lengths += active
             newly_done = active & physics.done
             outcomes = torch.where(newly_done, physics.winner, outcomes)
-            if step % frame_interval == 0 and len(frames) < self.video_max_frames and bool(active[0]):
+            ending_counts[0] += (newly_done & physics.ring_out).sum()
+            ending_counts[1] += (newly_done & physics.inactivity).sum()
+            ending_counts[2] += (newly_done & physics.numerical_failure).sum()
+            control_step = step + 1
+            scheduled = control_step in self.capture_steps
+            terminal_frame = bool(newly_done[0])
+            if (scheduled or terminal_frame) and len(frames) < self.video_max_frames and bool(active[0]):
                 frames.append(render_top_down(physics.state, self.arena_config))
             active &= ~newly_done
             if not bool(active.any()):
@@ -166,5 +261,12 @@ class LeaderValidation:
             "red_return": float(returns[:, RED].mean().item()),
             "blue_return": float(returns[:, BLUE].mean().item()),
             "episode_length": float(lengths.float().mean().item()),
+            "video_frames": float(len(frames)),
+            "ring_outs": float(ending_counts[0].item()),
+            "inactivity_endings": float(ending_counts[1].item()),
+            "numerical_failures": float(ending_counts[2].item()),
         }
+        for name, value in component_returns.items():
+            metrics[f"red_reward/{name}"] = float(value[:, RED].mean().item())
+            metrics[f"blue_reward/{name}"] = float(value[:, BLUE].mean().item())
         return ValidationResult(metrics=metrics, video=video)

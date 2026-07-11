@@ -18,13 +18,13 @@ from sumobot_ai.training.cpo import CapActorSuffix
 
 def replay_batch(batch: int = 5) -> dict[str, torch.Tensor]:
     return {
-        "student_obs": torch.zeros(batch, 28),
+        "student_obs": torch.zeros(batch, 25),
         "privileged_obs": torch.zeros(batch, 71),
-        "action_exec": torch.zeros(batch, 4),
-        "action_student_raw": torch.zeros(batch, 4),
-        "teacher_mean": torch.zeros(batch, 4),
-        "teacher_scale": torch.ones(batch, 4) * 0.2,
-        "teacher_action_mode": torch.zeros(batch, 4),
+        "action_exec": torch.zeros(batch, 2),
+        "action_student_raw": torch.zeros(batch, 2),
+        "teacher_mean": torch.zeros(batch, 2),
+        "teacher_scale": torch.ones(batch, 2) * 0.2,
+        "teacher_action_mode": torch.zeros(batch, 2),
         "teacher_value_raw": torch.zeros(batch, 1),
         "teacher_feature": torch.zeros(batch, 256),
         "teacher_valid": torch.ones(batch, 1, dtype=torch.bool),
@@ -36,7 +36,7 @@ def replay_batch(batch: int = 5) -> dict[str, torch.Tensor]:
         "is_first": torch.zeros(batch, 1, dtype=torch.bool),
         "is_last": torch.zeros(batch, 1, dtype=torch.bool),
         "is_terminal": torch.zeros(batch, 1, dtype=torch.bool),
-        "domain_parameters": torch.zeros(batch, 20),
+        "domain_parameters": torch.zeros(batch, 24),
         "sensor_age_s": torch.zeros(batch, 2),
         "sensor_valid": torch.ones(batch, 5, dtype=torch.bool),
         "timestamp_s": torch.arange(batch, dtype=torch.float32).unsqueeze(-1),
@@ -44,7 +44,7 @@ def replay_batch(batch: int = 5) -> dict[str, torch.Tensor]:
     }
 
 
-def fake_cap_actor(action_dim: int = 4) -> SimpleNamespace:
+def fake_cap_actor(action_dim: int = 2) -> SimpleNamespace:
     modules = []
     for index in range(3):
         modules.extend(
@@ -63,7 +63,7 @@ def fake_cap_actor(action_dim: int = 4) -> SimpleNamespace:
 def test_replay_contract_and_masked_kl() -> None:
     batch = replay_batch()
     ReplayContract.validate(batch)
-    student = Independent(Normal(torch.zeros(5, 4), torch.ones(5, 4) * 0.3), 1)
+    student = Independent(Normal(torch.zeros(5, 2), torch.ones(5, 2) * 0.3), 1)
     loss = masked_teacher_kl(student, batch["teacher_mean"], batch["teacher_scale"], batch["teacher_valid"])
     assert torch.isfinite(loss) and loss >= 0
 
@@ -80,7 +80,7 @@ def test_replay_rejects_unexecuted_action_range() -> None:
 
 
 def test_actor_suffix_copy_has_numerical_parity() -> None:
-    teacher = CapActorSuffix(4)
+    teacher = CapActorSuffix(2)
     cap = fake_cap_actor()
     manifest = copy_actor_suffix_to_cap(teacher, cap)
     parity = measure_actor_suffix_parity(teacher, cap, torch.randn(7, 256))

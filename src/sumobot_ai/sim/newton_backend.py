@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +9,10 @@ import numpy as np
 import torch
 
 from ..config import ArenaConfig
+from ..contracts import ACTION_DIM, DRIVEN_WHEEL_COUNT
 from ..domain_randomization import DomainBatch, DomainRandomizer
-from ..state import BLUE, DRAW, ONGOING, RED, ArenaState
+from ..match import resolve_match
+from ..state import DRAW, ArenaState
 
 try:  # Keep lightweight reward/curriculum tooling usable without the simulation extra.
     import newton
@@ -29,12 +31,12 @@ if wp is not None:
         max_wheel_speed: float,
     ):
         action_index = wp.tid()
-        world = action_index // 8
-        within_world = action_index - world * 8
-        robot = within_world // 4
-        wheel = within_world - robot * 4
-        # Each robot has a six-DOF free joint followed by four wheel hinges.
-        target_index = world * 20 + robot * 10 + 6 + wheel
+        world = action_index // 4
+        within_world = action_index - world * 4
+        robot = within_world // 2
+        wheel = within_world - robot * 2
+        # Each robot has a six-DOF free joint followed by two driven-wheel hinges.
+        target_index = world * 16 + robot * 8 + 6 + wheel
         targets[target_index] = actions[action_index] * max_wheel_speed
 
 
@@ -45,6 +47,9 @@ class PhysicsStep:
     terminated: torch.Tensor
     truncated: torch.Tensor
     winner: torch.Tensor
+    ring_out: torch.Tensor
+    inactivity: torch.Tensor
+    numerical_failure: torch.Tensor
 
     @property
     def done(self) -> torch.Tensor:
@@ -59,11 +64,11 @@ def _require_sim() -> None:
 class NewtonSumoArena:
     """GPU-vectorized two-robot arena using Newton's MuJoCo-Warp contact solver."""
 
-    BODIES_PER_WORLD = 10
-    SHAPES_PER_WORLD = 11
-    DOFS_PER_WORLD = 20
-    COORDS_PER_WORLD = 22
-    CHASSIS_BODY_INDICES = (0, 5)
+    BODIES_PER_WORLD = 6
+    SHAPES_PER_WORLD = 9
+    DOFS_PER_WORLD = 16
+    COORDS_PER_WORLD = 18
+    CHASSIS_BODY_INDICES = (0, 3)
 
     def __init__(
         self,
@@ -118,10 +123,15 @@ class NewtonSumoArena:
         max_delay = max(config.domain_randomization["action_latency_s"])
         self._history_length = math.ceil(max_delay / config.physics.control_dt) + 2
         self._action_history = torch.zeros(
-            (self._history_length, world_count, 2, 4), dtype=torch.float32, device=self.torch_device
+            (self._history_length, world_count, 2, ACTION_DIM), dtype=torch.float32, device=self.torch_device
         )
-        self._last_action_exec = torch.zeros((world_count, 2, 4), dtype=torch.float32, device=self.torch_device)
+        self._last_action_exec = torch.zeros(
+            (world_count, 2, ACTION_DIM), dtype=torch.float32, device=self.torch_device
+        )
         self._elapsed_steps = torch.zeros(world_count, dtype=torch.int64, device=self.torch_device)
+        self._stationary_steps = torch.zeros((world_count, 2), dtype=torch.int64, device=self.torch_device)
+        self._movement_steps = torch.zeros((world_count, 2), dtype=torch.int64, device=self.torch_device)
+        self._movement_confirmation_steps = math.ceil(config.match.movement_confirmation_s / config.physics.control_dt)
         self.domain = self.randomizer.sample(world_count, device=self.torch_device, generator=self.generator)
         self._apply_domain_parameters()
         self.reset()
@@ -185,17 +195,28 @@ class NewtonSumoArena:
             label=f"{label}/chassis_collision",
             color=color,
         )
+        skid_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.22, restitution=0.02)
+        builder.add_shape_sphere(
+            chassis,
+            xform=wp.transform(
+                (robot.skid_x_m, 0.0, -robot.chassis_size_m[2] / 2.0),
+                wp.quat_identity(),
+            ),
+            radius=robot.skid_radius_m,
+            cfg=skid_cfg,
+            label=f"{label}/skid_collision",
+            color=(0.15, 0.15, 0.15),
+        )
         joints = [builder.add_joint_free(chassis, label=f"{label}/free")]
         wheel_density = robot.wheel_mass_kg / (math.pi * robot.wheel_radius_m**2 * (2.0 * robot.wheel_width_m))
         wheel_cfg = newton.ModelBuilder.ShapeConfig(density=wheel_density, mu=1.0, restitution=0.02)
         wheel_shape_rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -math.pi / 2.0)
         cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
-        for wheel_name, local_x, local_y in (
-            ("front_left", robot.wheelbase_m / 2.0, robot.track_m / 2.0),
-            ("front_right", robot.wheelbase_m / 2.0, -robot.track_m / 2.0),
-            ("rear_left", -robot.wheelbase_m / 2.0, robot.track_m / 2.0),
-            ("rear_right", -robot.wheelbase_m / 2.0, -robot.track_m / 2.0),
+        for wheel_name, local_y in (
+            ("left_wheel", robot.track_m / 2.0),
+            ("right_wheel", -robot.track_m / 2.0),
         ):
+            local_x = robot.wheel_axle_x_m
             world_x = position[0] + cos_yaw * local_x - sin_yaw * local_y
             world_y = position[1] + sin_yaw * local_x + cos_yaw * local_y
             wheel_z = self.config.board.top_z_m + robot.wheel_radius_m
@@ -250,6 +271,7 @@ class NewtonSumoArena:
         board_mu = domain.board_friction.detach().cpu().numpy()
         chassis_mu = domain.chassis_friction.detach().cpu().numpy()
         wheel_mu = domain.wheel_friction.detach().cpu().numpy()
+        skid_mu = domain.skid_friction.detach().cpu().numpy()
         restitution_values = domain.restitution.detach().cpu().numpy()
         shape_mu = self.model.shape_material_mu.numpy()
         restitution = self.model.shape_material_restitution.numpy()
@@ -258,10 +280,11 @@ class NewtonSumoArena:
             shape_mu[offset] = board_mu[world, 0]
             restitution[offset] = restitution_values[world, 0]
             for robot in range(2):
-                shape_start = offset + 1 + robot * 5
+                shape_start = offset + 1 + robot * 4
                 shape_mu[shape_start] = chassis_mu[world, robot]
-                shape_mu[shape_start + 1 : shape_start + 5] = wheel_mu[world, robot]
-                restitution[shape_start : shape_start + 5] = restitution_values[world, 0]
+                shape_mu[shape_start + 1] = skid_mu[world, robot]
+                shape_mu[shape_start + 2 : shape_start + 4] = wheel_mu[world, robot]
+                restitution[shape_start : shape_start + 4] = restitution_values[world, 0]
         self.model.shape_material_mu.assign(shape_mu)
         self.model.shape_material_restitution.assign(restitution)
 
@@ -272,10 +295,10 @@ class NewtonSumoArena:
         for world in range(self.world_count):
             body_offset = world * self.BODIES_PER_WORLD
             for robot in range(2):
-                chassis_index = body_offset + robot * 5
+                chassis_index = body_offset + robot * 3
                 body_mass[chassis_index] *= chassis_scale[world, robot]
                 body_inertia[chassis_index] *= chassis_scale[world, robot]
-                wheel_slice = slice(chassis_index + 1, chassis_index + 5)
+                wheel_slice = slice(chassis_index + 1, chassis_index + 3)
                 body_mass[wheel_slice] *= wheel_scale[world, robot]
                 body_inertia[wheel_slice] *= wheel_scale[world, robot]
         self.model.body_mass.assign(body_mass)
@@ -289,7 +312,7 @@ class NewtonSumoArena:
         for world in range(self.world_count):
             dof_offset = world * self.DOFS_PER_WORLD
             for robot in range(2):
-                wheels = slice(dof_offset + robot * 10 + 6, dof_offset + robot * 10 + 10)
+                wheels = slice(dof_offset + robot * 8 + 6, dof_offset + robot * 8 + 8)
                 joint_effort[wheels] *= motor_scale[world, robot]
                 joint_target_kd[wheels] *= motor_scale[world, robot]
         self.model.joint_effort_limit.assign(joint_effort)
@@ -324,7 +347,7 @@ class NewtonSumoArena:
                 continue
             coordinate_offset = world * self.COORDS_PER_WORLD
             for robot, (position, yaw) in enumerate(base):
-                free_start = coordinate_offset + robot * 11
+                free_start = coordinate_offset + robot * 9
                 coordinates[free_start : free_start + 3] = (
                     position[0] + random_xy[world, robot, 0] * jitter_xy[0],
                     position[1] + random_xy[world, robot, 1] * jitter_xy[1],
@@ -337,7 +360,7 @@ class NewtonSumoArena:
                     math.sin(sampled_yaw / 2.0),
                     math.cos(sampled_yaw / 2.0),
                 )
-                coordinates[free_start + 7 : free_start + 11] = 0.0
+                coordinates[free_start + 7 : free_start + 9] = 0.0
         self.state_0.joint_q.assign(coordinates)
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
@@ -355,6 +378,8 @@ class NewtonSumoArena:
         self.solver.reset(self.state_0, world_mask=warp_mask)
         self._set_random_initial_coordinates(mask)
         self._elapsed_steps[mask] = 0
+        self._stationary_steps[mask] = 0
+        self._movement_steps[mask] = 0
         self._action_history[:, mask] = 0.0
         self._last_action_exec[mask] = 0.0
         return self.snapshot()
@@ -372,7 +397,7 @@ class NewtonSumoArena:
         return newer * (1.0 - fraction) + older * fraction
 
     def step(self, actions: torch.Tensor) -> PhysicsStep:
-        expected = (self.world_count, 2, 4)
+        expected = (self.world_count, 2, ACTION_DIM)
         if tuple(actions.shape) != expected:
             raise ValueError(f"actions must have shape {expected}")
         proposed = actions.to(device=self.torch_device, dtype=torch.float32).clamp(-1.0, 1.0)
@@ -381,7 +406,7 @@ class NewtonSumoArena:
         action_warp = wp.from_torch(executed.contiguous().view(-1), dtype=wp.float32)
         wp.launch(
             _scatter_wheel_targets,
-            dim=self.world_count * 8,
+            dim=self.world_count * 2 * DRIVEN_WHEEL_COUNT,
             inputs=(action_warp, self.control.joint_target_qd, self.config.robot.max_wheel_speed_rad_s),
             device=self.model.device,
         )
@@ -397,16 +422,43 @@ class NewtonSumoArena:
             self.state_0, self.state_1 = self.state_1, self.state_0
         self._elapsed_steps += 1
         state = self.snapshot()
+        planar_speed = torch.linalg.vector_norm(state.linear_velocity[..., :2], dim=-1)
+        movement_candidate = planar_speed >= self.config.match.movement_speed_threshold_m_s
+        self._movement_steps = torch.where(
+            movement_candidate, self._movement_steps + 1, torch.zeros_like(self._movement_steps)
+        )
+        moving = self._movement_steps >= self._movement_confirmation_steps
+        self._stationary_steps = torch.where(
+            moving, torch.zeros_like(self._stationary_steps), self._stationary_steps + 1
+        )
+        stationary_time = self._stationary_steps.to(torch.float32) * self.config.physics.control_dt
+        state = replace(state, stationary_time_s=stationary_time)
         out = state.edge_margin < 0.0
         fallen = state.position[:, :, 2] < self.config.board.top_z_m - self.config.robot.wheel_radius_m
         out = out | fallen
-        terminated = out.any(dim=-1)
-        truncated = (self._elapsed_steps >= self.config.physics.max_episode_steps) & ~terminated
-        winner = torch.full((self.world_count,), ONGOING, dtype=torch.int64, device=self.torch_device)
-        winner = torch.where(out[:, RED] & ~out[:, BLUE], torch.full_like(winner, BLUE), winner)
-        winner = torch.where(out[:, BLUE] & ~out[:, RED], torch.full_like(winner, RED), winner)
-        winner = torch.where((out[:, RED] & out[:, BLUE]) | truncated, torch.full_like(winner, DRAW), winner)
-        return PhysicsStep(state, proposed, terminated, truncated, winner)
+        finite = torch.ones((self.world_count, 2), dtype=torch.bool, device=self.torch_device)
+        for value in (
+            state.position,
+            state.quaternion,
+            state.linear_velocity,
+            state.angular_velocity,
+            state.wheel_velocity,
+        ):
+            finite &= torch.isfinite(value).flatten(start_dim=2).all(dim=-1)
+        numerical_failure = ~finite.all(dim=-1)
+        inactive = stationary_time >= self.config.match.inactivity_timeout_s
+        timed_out = self._elapsed_steps >= self.config.physics.max_episode_steps
+        resolution = resolve_match(out, inactive, timed_out, numerical_failure)
+        return PhysicsStep(
+            state=state,
+            action_proposed=proposed,
+            terminated=resolution.terminated,
+            truncated=resolution.truncated,
+            winner=resolution.winner,
+            ring_out=resolution.ring_out,
+            inactivity=resolution.inactivity,
+            numerical_failure=resolution.numerical_failure,
+        )
 
     def snapshot(self) -> ArenaState:
         body_q = wp.to_torch(self.state_0.body_q).reshape(self.world_count, self.BODIES_PER_WORLD, 7)
@@ -415,7 +467,7 @@ class NewtonSumoArena:
         pose = body_q.index_select(1, chassis)
         twist = body_qd.index_select(1, chassis)
         joint_qd = wp.to_torch(self.state_0.joint_qd).reshape(self.world_count, self.DOFS_PER_WORLD)
-        wheel_velocity = torch.stack((joint_qd[:, 6:10], joint_qd[:, 16:20]), dim=1)
+        wheel_velocity = torch.stack((joint_qd[:, 6:8], joint_qd[:, 14:16]), dim=1)
         position = pose[..., :3].clone()
         half_x, half_y = (value / 2.0 for value in self.config.board.size_m)
         edge_margin = torch.minimum(half_x - position[..., 0].abs(), half_y - position[..., 1].abs())
@@ -431,6 +483,7 @@ class NewtonSumoArena:
             action_exec=self._last_action_exec.clone(),
             contact_force=torch.zeros((self.world_count, 2, 3), device=self.torch_device),
             edge_margin=edge_margin,
+            stationary_time_s=self._stationary_steps.to(torch.float32) * self.config.physics.control_dt,
             time_remaining_s=time_remaining,
         )
 
@@ -441,7 +494,7 @@ def run_smoke(config_path: Path, *, world_count: int, steps: int, device: str) -
     config = ArenaConfig.load(config_path)
     arena = NewtonSumoArena(config, world_count, device=device, seed=7)
     initial = arena.snapshot()
-    actions = torch.ones((world_count, 2, 4), dtype=torch.float32, device=device) * 0.35
+    actions = torch.ones((world_count, 2, ACTION_DIM), dtype=torch.float32, device=device) * 0.35
     result = None
     for _ in range(steps):
         result = arena.step(actions)
@@ -461,6 +514,34 @@ def run_smoke(config_path: Path, *, world_count: int, steps: int, device: str) -
         raise RuntimeError("wheel commands did not produce meaningful planar motion")
     if minimum_height < config.board.top_z_m - 0.01 or maximum_height > config.board.top_z_m + 0.10:
         raise RuntimeError("chassis height left the calibrated board-contact envelope")
+
+    arena.reset()
+    turn_actions = torch.zeros((world_count, 2, ACTION_DIM), dtype=torch.float32, device=device)
+    turn_actions[..., 0] = -0.35
+    turn_actions[..., 1] = 0.35
+    turn_result = None
+    for _ in range(steps):
+        turn_result = arena.step(turn_actions)
+        if bool(turn_result.done.all()):
+            break
+    assert turn_result is not None
+    max_yaw_rate = float(turn_result.state.angular_velocity[..., 2].abs().max().item())
+    if steps >= 10 and max_yaw_rate < 0.1:
+        raise RuntimeError("independent left/right wheel commands did not produce differential turning")
+
+    arena.reset()
+    idle_actions = torch.zeros((world_count, 2, ACTION_DIM), dtype=torch.float32, device=device)
+    idle_result = None
+    idle_steps = 0
+    idle_limit = round((config.match.inactivity_timeout_s + 5.0) * config.physics.control_hz)
+    for _ in range(idle_limit):
+        idle_steps += 1
+        idle_result = arena.step(idle_actions)
+        if bool(idle_result.done.all()):
+            break
+    assert idle_result is not None
+    if not bool(idle_result.inactivity.all()) or not bool((idle_result.winner == DRAW).all()):
+        raise RuntimeError("two inactive robots did not end in a draw within the inactivity window")
     return {
         "backend": "Newton SolverMuJoCo / MuJoCo-Warp contacts",
         "device": str(arena.model.device),
@@ -469,8 +550,15 @@ def run_smoke(config_path: Path, *, world_count: int, steps: int, device: str) -
         "finite": finite,
         "mean_displacement_m": mean_displacement,
         "max_speed_m_s": float(torch.linalg.vector_norm(final.linear_velocity, dim=-1).max().item()),
+        "max_differential_yaw_rate_rad_s": max_yaw_rate,
+        "stationary_draw_after_s": idle_steps * config.physics.control_dt,
         "chassis_height_range_m": [minimum_height, maximum_height],
         "terminated_worlds": int(result.terminated.sum().item()),
+        "numerical_failures": int(
+            result.numerical_failure.sum().item()
+            + turn_result.numerical_failure.sum().item()
+            + idle_result.numerical_failure.sum().item()
+        ),
         "board_size_m": list(config.board.size_m),
         "robot_chassis_size_m": list(config.robot.chassis_size_m),
     }

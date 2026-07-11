@@ -12,6 +12,8 @@ import yaml
 
 from .terms import TERM_DEFINITIONS
 
+MAX_GUIDANCE_FRACTION_OF_WIN = 0.25
+
 
 @dataclass(frozen=True, slots=True)
 class RewardTerm:
@@ -26,6 +28,7 @@ class RewardSpec:
     name: str
     description: str
     terms: tuple[RewardTerm, ...]
+    guidance_max_abs_per_second: float
     clip: tuple[float, float] | None = None
 
     @classmethod
@@ -68,11 +71,20 @@ class RewardSpec:
             clip = (float(clip_raw[0]), float(clip_raw[1]))
             if not all(math.isfinite(value) for value in clip) or clip[0] >= clip[1]:
                 raise ValueError("clip bounds must be finite and increasing")
+        if "guidance_max_abs_per_second" not in data:
+            raise ValueError("reward spec must declare guidance_max_abs_per_second")
+        guidance_rate = float(data["guidance_max_abs_per_second"])
+        if not math.isfinite(guidance_rate) or guidance_rate < 0:
+            raise ValueError("guidance_max_abs_per_second must be finite and non-negative")
+        outcome_terms = [term for term in terms if term.name == "win_loss"]
+        if len(outcome_terms) != 1 or outcome_terms[0].weight <= 0:
+            raise ValueError("reward spec must contain one positive-weight win_loss term")
         return cls(
             version=1,
             name=str(data.get("name", "unnamed")),
             description=str(data.get("description", "")),
             terms=tuple(terms),
+            guidance_max_abs_per_second=guidance_rate,
             clip=clip,
         )
 
@@ -89,6 +101,7 @@ class RewardSpec:
             "version": self.version,
             "name": self.name,
             "description": self.description,
+            "guidance_max_abs_per_second": self.guidance_max_abs_per_second,
             "clip": list(self.clip) if self.clip is not None else None,
             "terms": [
                 {"name": term.name, "weight": term.weight, "params": dict(sorted(term.params.items()))}
@@ -100,3 +113,24 @@ class RewardSpec:
     def digest(self) -> str:
         encoded = json.dumps(self.canonical_dict(), sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    @property
+    def win_reward(self) -> float:
+        return next(term.weight for term in self.terms if term.name == "win_loss")
+
+    def validate_for_episode(self, episode_seconds: float) -> None:
+        if not math.isfinite(episode_seconds) or episode_seconds <= 0:
+            raise ValueError("episode_seconds must be finite and positive")
+        guidance_budget = self.guidance_max_abs_per_second * episode_seconds
+        allowed = self.win_reward * MAX_GUIDANCE_FRACTION_OF_WIN
+        if guidance_budget > allowed + 1e-9:
+            raise ValueError(
+                f"guidance budget {guidance_budget:g} exceeds {MAX_GUIDANCE_FRACTION_OF_WIN:.0%} "
+                f"of the {self.win_reward:g} win reward"
+            )
+        if self.clip is not None:
+            required = self.win_reward + guidance_budget
+            if self.clip[0] > -required or self.clip[1] < required:
+                raise ValueError(
+                    f"clip {self.clip} can override the outcome-dominance budget; it must include ±{required:g}"
+                )

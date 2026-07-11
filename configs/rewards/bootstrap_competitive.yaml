@@ -1,17 +1,29 @@
 version: 1
 name: bootstrap_competitive_v0
 description: Shared zero-sum outcome reward for the two live CPO populations during bootstrap.
-clip: [-4.0, 4.0]
+# All non-outcome terms are combined and rate-limited to ±0.05/s by the
+# evaluator: at most ±1.5 over a full 30-second match versus ±10 for outcome.
+guidance_max_abs_per_second: 0.05
+clip: [-12.0, 12.0]
 terms:
   - name: win_loss
-    weight: 3.0
+    weight: 10.0
+  - name: approach_opponent
+    weight: 0.25
+    params:
+      scale_m: 1.0
+      discount: 1.0
   - name: push_opponent_to_edge
     weight: 0.5
     params:
       scale_m: 1.0
       discount: 1.0
   - name: protect_own_edge
-    weight: 0.2
+    weight: 0.15
     params:
       scale_m: 1.0
       discount: 1.0
+  - name: face_opponent
+    weight: 0.01
+  - name: action_energy
+    weight: 0.002

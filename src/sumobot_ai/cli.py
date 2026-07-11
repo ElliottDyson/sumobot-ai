@@ -30,6 +30,10 @@ def _reward_lint(args: argparse.Namespace) -> int:
         if getattr(imported, "__file__", None):
             source_paths.append(Path(imported.__file__).resolve())
     spec = RewardSpec.load(args.path)
+    from .config import ArenaConfig
+
+    arena = ArenaConfig.load(args.arena)
+    spec.validate_for_episode(arena.physics.episode_seconds)
     code_hash = hashlib.sha256()
     for path in sorted(set(source_paths)):
         code_hash.update(str(path.name).encode())
@@ -38,6 +42,9 @@ def _reward_lint(args: argparse.Namespace) -> int:
     print(f"spec_sha256: {spec.digest}")
     print(f"code_sha256: {code_hash.hexdigest()}")
     print(f"clip: {spec.clip}")
+    guidance_budget = spec.guidance_max_abs_per_second * arena.physics.episode_seconds
+    print(f"win_reward: {spec.win_reward:g}")
+    print(f"guidance_budget: ±{guidance_budget:g} per {arena.physics.episode_seconds:g}s match")
     for term in spec.terms:
         print(f"  {term.name}: weight={term.weight:g} params={dict(term.params)}")
     return 0
@@ -90,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     reward_subcommands = reward.add_subparsers(dest="reward_command", required=True)
     lint = reward_subcommands.add_parser("lint", help="validate and hash a reward YAML")
     lint.add_argument("path", type=Path)
+    lint.add_argument("--arena", default="configs/arena/flat_3x2.yaml")
     lint.add_argument(
         "--plugin", action="append", default=[], help="import a Python module that registers custom terms"
     )

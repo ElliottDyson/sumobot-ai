@@ -19,3 +19,6 @@ def test_newton_mujoco_warp_smoke() -> None:
     assert result["finite"]
     assert result["worlds"] == 2
     assert result["mean_displacement_m"] > 0.02
+    assert result["max_differential_yaw_rate_rad_s"] > 0.1
+    assert 10.0 <= result["stationary_draw_after_s"] <= 15.0
+    assert result["numerical_failures"] == 0

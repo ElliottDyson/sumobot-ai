@@ -2,15 +2,16 @@
 
 ## Scope of the first release
 
-The first release is a deliberately small, measurable environment: two four-wheel robots on a finite flat table.
+The first release is a deliberately small, measurable environment: two differential-drive robots on a finite flat
+table, each using two driven wheels and a passive skid.
 It establishes interfaces that later Sumobot tasks can extend without changing the training algorithms' basic data
 contracts. It does not yet claim a trained policy or sim-to-real transfer.
 
 The challenge has three distinct objectives which must not be conflated:
 
 1. **Tournament objective:** fixed, zero-sum win/loss/draw scoring. This is the only ranking signal.
-2. **Training task reward:** bootstrap uses a shared win/loss-dominant competitive reward; a later member session uses
-   that member's reproducible YAML reward.
+2. **Training task reward:** bootstrap uses a shared outcome-dominant competitive reward; a later member session uses
+   that member's reproducible YAML reward. The aggregate non-outcome channel is rate-capped.
 3. **CPO diversity reward:** an optional follower-only signal that can make policies within one CPO population
    distinguishable. It is disabled for the first bootstrap run and never stored as CAP-Dreamer's environment reward.
 
@@ -18,13 +19,19 @@ The challenge has three distinct objectives which must not be conflated:
 
 - Coordinates are metres, seconds, kilograms, radians, and Newton uses `+z` as up.
 - The table is a finite `3 x 2 x 0.05 m` box whose top is at `z=0`.
-- The robot axis convention is `x=forward`, `y=left`, `z=up`, with a `40 x 40 mm` footprint and `80 mm` height.
-- Actions are four normalized wheel-velocity commands in `[front_left, front_right, rear_left, rear_right]` order.
+- The robot axis convention is `x=forward`, `y=left`, `z=up`, with a `40 x 40 mm` chassis footprint and `80 mm`
+  chassis height.
+- Each robot has one driven wheel on each side of a common axle and a low-friction passive rear skid.
+- Actions are two normalized wheel-velocity commands in `[left_wheel, right_wheel]` order.
 - The environment clips, latency-delays, and motor-scales an action before it reaches physics. The resulting
   `action_exec`, rather than a policy proposal, is fed to recurrent state and replay.
 - Control runs at 50 Hz with four MuJoCo-Warp substeps initially. Both are configuration values.
 - The provisional out rule is that a chassis centre crosses a board edge. Before a public challenge, replace or
   ratify this with the society's physical rule and add golden tests.
+- A robot below `0.01 m/s` planar chassis speed for ten continuous seconds loses. Movement must remain above the
+  threshold for `0.2 s` before it resets the timer, preventing a single solver-jitter or one-tick command spike from
+  evading the rule. Physical movement, including being pushed, counts. If both timers expire on the same control
+  step, the result is a draw. Ring-out takes precedence if ring-out and inactivity occur together.
 
 ## Observation boundary
 
@@ -57,14 +64,17 @@ CPO structure:
 - relabelled transitions support an AWAC term;
 - a classifier over state/action identifies policy IDs and supplies a small follower-only diversity reward.
 
-The red-vs-blue task is adversarial in the literal game-theoretic sense: winning is positive, losing is negative, and
-the two separately optimized models are each other's changing opponent. This win/loss-dominant reward is the primary
-bootstrap signal. That is separate from CPO's optional classifier reward. Keeping the two channels separate makes
-reward ablations and student training interpretable.
+The red-vs-blue task is adversarial in the literal game-theoretic sense: winning is `+10`, losing is `-10`, and the
+two separately optimized models are each other's changing opponent. All authored non-outcome terms are summed into a
+guidance channel and clipped to `±0.05 × transition_seconds`. Its absolute full-match budget is therefore at most
+`1.5`, or 15% of a win, regardless of the number or scale of custom terms. Load-time validation rejects a guidance
+budget above 25% of the win magnitude. This is separate from CPO's optional classifier reward.
 
-Training writes one TensorBoard event stream containing outcome rates, rewards, red/blue losses, KL diagnostics,
-gradient norms, and simulator throughput. At a fixed update interval, a seeded leader-vs-leader validation batch runs
-without exploration and records aggregate metrics plus a lightweight top-down video. Checkpoints contain both model
+Training writes one TensorBoard event stream containing outcome rates, termination causes, rewards, red/blue losses,
+KL diagnostics, gradient norms, and simulator throughput. At a fixed update interval, a seeded leader-vs-leader
+validation batch runs without exploration and records aggregate metrics plus a lightweight top-down video. Its frame
+schedule is validated to include the reset and terminal match-time frames rather than truncating at a frame cap.
+Checkpoints contain both model
 and optimizer states and all random-number-generator states needed to resume the paired populations together.
 
 ## Phase B: one member CPO population against the curriculum
@@ -126,7 +136,7 @@ observation schema version, and simulator/domain-randomization version.
 
 ## Domain randomization
 
-Randomization is sampled per arena and per episode. The first ranges cover board, chassis and wheel friction;
+Randomization is sampled per arena and per episode. The first ranges cover board, chassis, wheel, and skid friction;
 restitution; chassis and wheel mass; motor strength; action latency; encoder/IMU noise; and opponent-sensor dropout.
 Newton material changes are batched and followed by `SolverMuJoCo.notify_model_changed(...)`. Parameters are visible
 to the privileged teacher and dataset diagnostics, never directly to the deployed actor.

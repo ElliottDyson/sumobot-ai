@@ -5,8 +5,9 @@ their own training rewards. Two privileged CPO populations first learn against e
 curriculum. A member then trains one CPO population against that curriculum with their reward, and distils its leader
 into a deployable CAP-Dreamer student.
 
-The first arena is a flat, finite `3 m x 2 m` table. Each arena contains two standardized four-wheel robots and is
-replicated on the GPU. Newton supplies the simulation model and `SolverMuJoCo` runs MuJoCo-Warp contact physics.
+The first arena is a flat, finite `3 m x 2 m` table. Each arena contains two standardized differential-drive robots,
+each with two independently driven wheels and a passive rear skid, and is replicated on the GPU. Newton supplies the
+simulation model and `SolverMuJoCo` runs MuJoCo-Warp contact physics.
 
 ## What exists now
 
@@ -22,7 +23,8 @@ replicated on the GPU. Newton supplies the simulation model and `SolverMuJoCo` r
 - An executable dual-population bootstrap trainer with checkpoints, TensorBoard metrics, and validation-match videos.
 
 The repository deliberately treats the robot dimensions and deployable sensor suite as versioned challenge
-contracts. The standardized geometry is `40 mm` fore-aft, `40 mm` wide, and `80 mm` high.
+contracts. The standardized chassis geometry is `40 mm` fore-aft, `40 mm` wide, and `80 mm` high. Policy actions are
+the normalized target velocities of the left and right driven wheels; the skid is passive.
 
 ## Quick start
 
@@ -91,4 +93,7 @@ member CPO + custom reward ─────────────────�
 ```
 
 Bootstrap's primary adversarial signal is the literal zero-sum match outcome. In later member sessions, authored
-shaping affects their training but never tournament ranking.
+shaping affects their training but never tournament ranking. Ring-out takes precedence; otherwise, a robot that stays
+below the configured planar movement threshold for ten continuous seconds loses, with simultaneous inactivity scored
+as a draw. All non-outcome reward terms share a strict per-second cap, so their full-match contribution cannot
+overpower win/loss.

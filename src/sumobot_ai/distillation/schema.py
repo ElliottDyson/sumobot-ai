@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass
 import torch
 from torch.distributions import Independent, Normal
 
+from ..contracts import ACTION_DIM
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetMetadata:
@@ -37,7 +39,7 @@ class DatasetMetadata:
             if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
                 raise ValueError(f"{name} must be a lowercase SHA-256 digest")
         if self.teacher_leader_id != 0:
-            raise ValueError("CPO leader ID is fixed to 0 in schema version 1")
+            raise ValueError("CPO leader ID is fixed to 0 in schema version 2")
 
     @property
     def digest(self) -> str:
@@ -48,7 +50,7 @@ class DatasetMetadata:
 class ReplayContract:
     """Validator for current-observation labels and executed-action world-model transitions."""
 
-    VERSION = 1
+    VERSION = 2
     REQUIRED_FIELDS = frozenset(
         {
             "student_obs",
@@ -83,7 +85,7 @@ class ReplayContract:
     )
 
     @classmethod
-    def validate(cls, batch: Mapping[str, torch.Tensor], *, action_dim: int = 4) -> None:
+    def validate(cls, batch: Mapping[str, torch.Tensor], *, action_dim: int = ACTION_DIM) -> None:
         missing = cls.REQUIRED_FIELDS - batch.keys()
         if missing:
             raise ValueError(f"replay batch is missing fields: {sorted(missing)}")

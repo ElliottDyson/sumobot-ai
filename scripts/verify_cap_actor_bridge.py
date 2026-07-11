@@ -25,7 +25,7 @@ def main() -> int:
     import networks
 
     config = SimpleNamespace(
-        shape=(4,),
+        shape=(2,),
         layers=3,
         units=256,
         act="SiLU",
@@ -36,7 +36,7 @@ def main() -> int:
         dist=SimpleNamespace(name="bounded_normal", min_std=0.1, max_std=1.0),
     )
     cap_actor = networks.MLPHead(config, inp_dim=256, validate_args=True)
-    teacher_suffix = CapActorSuffix(action_dim=4)
+    teacher_suffix = CapActorSuffix(action_dim=2)
     manifest = copy_actor_suffix_to_cap(teacher_suffix, cap_actor)
     generator = torch.Generator().manual_seed(17)
     bottleneck = torch.randn(32, 256, generator=generator)

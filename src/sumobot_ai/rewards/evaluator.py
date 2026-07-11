@@ -18,18 +18,29 @@ class RewardResult:
 
 def evaluate_reward(spec: RewardSpec, transition: ArenaTransition) -> RewardResult:
     components: dict[str, torch.Tensor] = {}
-    total = torch.zeros(
+    outcome = torch.zeros(
         (transition.current.batch_size, 2),
         dtype=transition.current.position.dtype,
         device=transition.current.position.device,
     )
+    guidance = torch.zeros_like(outcome)
     for term in spec.terms:
         raw = TERM_DEFINITIONS[term.name].function(transition, term.params)
-        if tuple(raw.shape) != tuple(total.shape):
-            raise RuntimeError(f"reward term {term.name!r} returned {tuple(raw.shape)}, expected {tuple(total.shape)}")
-        weighted = raw * term.weight
+        if tuple(raw.shape) != tuple(outcome.shape):
+            raise RuntimeError(
+                f"reward term {term.name!r} returned {tuple(raw.shape)}, expected {tuple(outcome.shape)}"
+            )
+        weighted = torch.nan_to_num(raw * term.weight, nan=0.0, posinf=0.0, neginf=0.0)
         components[term.name] = weighted
-        total = total + weighted
+        if term.name == "win_loss":
+            outcome = outcome + weighted
+        else:
+            guidance = guidance + weighted
+    guidance_cap = spec.guidance_max_abs_per_second * transition.dt.unsqueeze(-1)
+    bounded_guidance = guidance.clamp(-guidance_cap, guidance_cap)
+    components["guidance_bounded"] = bounded_guidance
+    components["guidance_clip_delta"] = bounded_guidance - guidance
+    total = outcome + bounded_guidance
     if spec.clip is not None:
         unclipped = total
         total = total.clamp(*spec.clip)

@@ -7,12 +7,12 @@ from sumobot_ai.training.cpo import CpoLossConfig, DiversityDiscriminator, Trans
 
 
 def test_transplantable_population_shapes_and_distribution() -> None:
-    model = TransplantableCPOActorCritic(71, 4, population_size=6)
+    model = TransplantableCPOActorCritic(71, 2, population_size=6)
     observation = torch.randn(12, 71)
     policy_id = torch.arange(12) % 6
     output = model(observation, policy_id.long())
     action = output.distribution.rsample()
-    assert action.shape == (12, 4)
+    assert action.shape == (12, 2)
     assert output.value.shape == (12,)
     assert output.bottleneck.shape == (12, 256)
     assert output.distribution.base_dist.loc.abs().max() <= 1.0
@@ -53,8 +53,8 @@ def test_optional_diversity_reward_excludes_leader() -> None:
 
 
 def test_dual_bootstrap_updates_two_independent_populations_after_barrier() -> None:
-    red_model = TransplantableCPOActorCritic(12, 4, population_size=2)
-    blue_model = TransplantableCPOActorCritic(12, 4, population_size=2)
+    red_model = TransplantableCPOActorCritic(12, 2, population_size=2)
+    blue_model = TransplantableCPOActorCritic(12, 2, population_size=2)
     session = DualCpoBootstrapSession(
         CpoPopulationInstance("red", red_model, torch.optim.Adam(red_model.parameters(), lr=1e-3)),
         CpoPopulationInstance("blue", blue_model, torch.optim.Adam(blue_model.parameters(), lr=1e-3)),
@@ -65,7 +65,7 @@ def test_dual_bootstrap_updates_two_independent_populations_after_barrier() -> N
     observation = torch.randn(6, 12)
     policy_id = torch.arange(6).remainder(2).long()
     red, blue = session.act(observation, policy_id, observation, policy_id)
-    actions = torch.zeros(6, 4)
+    actions = torch.zeros(6, 2)
     metrics = session.finish_rollout(
         -red.distribution.log_prob(actions).mean(),
         -blue.distribution.log_prob(actions).mean(),

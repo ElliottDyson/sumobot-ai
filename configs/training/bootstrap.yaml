@@ -24,5 +24,7 @@ checkpoint_every_updates: 10
 validation_every_updates: 10
 validation_envs: 16
 validation_seed: 2026
-validation_video_fps: 10
-validation_video_max_frames: 150
+validation_video_fps: 5
+# Initial frame plus 30 seconds at 5 fps. The validator rejects a cap that
+# would truncate the match before its terminal frame.
+validation_video_max_frames: 151

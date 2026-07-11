@@ -26,10 +26,11 @@ def make_state(*, current: bool) -> ArenaState:
         quaternion=quaternion,
         linear_velocity=torch.zeros(batch, 2, 3),
         angular_velocity=torch.zeros(batch, 2, 3),
-        wheel_velocity=torch.zeros(batch, 2, 4),
-        action_exec=torch.full((batch, 2, 4), 0.25),
+        wheel_velocity=torch.zeros(batch, 2, 2),
+        action_exec=torch.full((batch, 2, 2), 0.25),
         contact_force=torch.zeros(batch, 2, 3),
         edge_margin=edge,
+        stationary_time_s=torch.zeros(batch, 2),
         time_remaining_s=torch.full((batch,), 9.98 if current else 10.0),
     )
 
@@ -48,7 +49,7 @@ def test_sparse_outcome_reward_is_zero_sum_and_swap_symmetric() -> None:
     spec = RewardSpec.load(ROOT / "configs/rewards/sparse.yaml")
     transition = make_transition()
     reward = evaluate_reward(spec, transition).total
-    assert torch.equal(reward, torch.tensor([[3.0, -3.0], [-3.0, 3.0], [0.0, 0.0]]))
+    assert torch.equal(reward, torch.tensor([[10.0, -10.0], [-10.0, 10.0], [0.0, 0.0]]))
     swapped = evaluate_reward(spec, transition.swapped()).total
     assert torch.equal(swapped, reward[:, [1, 0]])
 
@@ -86,8 +87,38 @@ def test_member_can_register_a_vectorized_custom_term() -> None:
         {
             "version": 1,
             "name": "custom",
-            "terms": [{"name": "test_custom_constant", "weight": 2.0}],
+            "guidance_max_abs_per_second": 0.05,
+            "clip": [-12.0, 12.0],
+            "terms": [
+                {"name": "win_loss", "weight": 10.0},
+                {"name": "test_custom_constant", "weight": 2.0},
+            ],
         }
     )
     result = evaluate_reward(spec, make_transition())
-    assert torch.equal(result.total, torch.full((3, 2), 0.5))
+    assert torch.equal(result.components["test_custom_constant"], torch.full((3, 2), 0.5))
+    assert torch.allclose(
+        result.total,
+        torch.tensor([[10.001, -9.999], [-9.999, 10.001], [0.001, 0.001]]),
+        atol=1e-6,
+    )
+
+
+def test_guidance_budget_is_bounded_well_below_win_reward() -> None:
+    spec = RewardSpec.load(ROOT / "configs/rewards/baseline.yaml")
+    spec.validate_for_episode(30.0)
+    result = evaluate_reward(spec, make_transition())
+    outcome = result.components["win_loss"]
+    assert bool(((result.total - outcome).abs() <= 0.05 * 0.02 + 2e-6).all())
+
+
+def test_reward_rejects_guidance_budget_that_can_overpower_outcome() -> None:
+    data = RewardSpec.load(ROOT / "configs/rewards/baseline.yaml").canonical_dict()
+    data["guidance_max_abs_per_second"] = 1.0
+    spec = RewardSpec.from_mapping(data)
+    try:
+        spec.validate_for_episode(30.0)
+    except ValueError as error:
+        assert "guidance budget" in str(error)
+    else:
+        raise AssertionError("an outcome-overpowering guidance budget was accepted")

@@ -12,6 +12,7 @@ class DomainBatch:
     board_friction: torch.Tensor  # (B, 1)
     chassis_friction: torch.Tensor  # (B, 2)
     wheel_friction: torch.Tensor  # (B, 2)
+    skid_friction: torch.Tensor  # (B, 2)
     restitution: torch.Tensor  # (B, 1)
     chassis_mass_scale: torch.Tensor  # (B, 2)
     wheel_mass_scale: torch.Tensor  # (B, 2)
@@ -31,6 +32,7 @@ class DomainBatch:
             ("board_friction", self.board_friction),
             ("chassis_friction", self.chassis_friction),
             ("wheel_friction", self.wheel_friction),
+            ("skid_friction", self.skid_friction),
             ("restitution", self.restitution),
             ("chassis_mass_scale", self.chassis_mass_scale),
             ("wheel_mass_scale", self.wheel_mass_scale),
@@ -58,6 +60,7 @@ class DomainRandomizer:
         {
             "chassis_friction",
             "wheel_friction",
+            "skid_friction",
             "chassis_mass_scale",
             "wheel_mass_scale",
             "motor_strength_scale",

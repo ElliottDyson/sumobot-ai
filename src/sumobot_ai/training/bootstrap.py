@@ -17,13 +17,14 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from ..config import ArenaConfig
+from ..contracts import ACTION_DIM
 from ..observations import build_teacher_observation
 from ..rewards import RewardSpec, evaluate_reward
 from ..sim.newton_backend import NewtonSumoArena
 from ..state import BLUE, DRAW, RED, ArenaState, ArenaTransition
 from .cpo import CpoLossConfig, TransplantableCPOActorCritic, cpo_actor_loss
 from .matchmaking import BootstrapMatchmaker
-from .validation import LeaderValidation
+from .validation import LeaderValidation, add_tensorboard_video
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +164,7 @@ class BootstrapTrainer:
     ) -> None:
         self.arena_config = arena_config
         self.reward_spec = reward_spec
+        reward_spec.validate_for_episode(arena_config.physics.episode_seconds)
         self.config = training_config
         self.cpo_config = dict(cpo_config)
         self.logdir = Path(logdir)
@@ -242,7 +244,7 @@ class BootstrapTrainer:
     def _make_model(self, observation_dim: int) -> TransplantableCPOActorCritic:
         return TransplantableCPOActorCritic(
             observation_dim=observation_dim,
-            action_dim=4,
+            action_dim=ACTION_DIM,
             population_size=self.population_size,
             policy_id_dim=int(self.cpo_config["policy_id_dim"]),
             frontend_units=tuple(int(value) for value in self.cpo_config["teacher_frontend_units"]),
@@ -260,7 +262,7 @@ class BootstrapTrainer:
             "training": asdict(self.config),
             "cpo": self.cpo_config,
             "teacher_observation_dim": observation_dim,
-            "action_dim": 4,
+            "action_dim": ACTION_DIM,
         }
         path = self.logdir / "run_config.json"
         path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
@@ -337,6 +339,8 @@ class BootstrapTrainer:
         completed_returns: list[torch.Tensor] = []
         completed_lengths: list[torch.Tensor] = []
         wins = torch.zeros(3, dtype=torch.int64, device=self.device)  # red, blue, draw
+        endings = torch.zeros(3, dtype=torch.int64, device=self.device)  # ring-out, inactivity, numerical failure
+        component_sums: dict[str, torch.Tensor] = {}
 
         for _ in range(self.config.rollout_steps):
             with torch.no_grad():
@@ -356,7 +360,10 @@ class BootstrapTrainer:
                 truncated=physics.truncated,
                 winner=physics.winner,
             )
-            reward = evaluate_reward(self.reward_spec, transition).total
+            reward_result = evaluate_reward(self.reward_spec, transition)
+            reward = reward_result.total
+            for name, value in reward_result.components.items():
+                component_sums[name] = component_sums.get(name, torch.zeros(2, device=self.device)) + value.sum(dim=0)
             for storage, observation, policy_id, action, log_prob, value, side in (
                 (red_storage, red_observation, red_policy_id, red_action, red_log_prob, red_output.value, RED),
                 (blue_storage, blue_observation, blue_policy_id, blue_action, blue_log_prob, blue_output.value, BLUE),
@@ -370,6 +377,9 @@ class BootstrapTrainer:
                 storage["done"].append(physics.done)
             episode_return += reward
             episode_length += 1
+            endings[0] += physics.ring_out.sum()
+            endings[1] += physics.inactivity.sum()
+            endings[2] += physics.numerical_failure.sum()
             if bool(physics.done.any()):
                 indices = physics.done.nonzero(as_tuple=False).squeeze(-1)
                 completed_returns.append(episode_return[indices].clone())
@@ -417,6 +427,9 @@ class BootstrapTrainer:
             "red_win_rate": float(wins[RED].item() / max(episodes, 1)),
             "blue_win_rate": float(wins[BLUE].item() / max(episodes, 1)),
             "draw_rate": float(wins[2].item() / max(episodes, 1)),
+            "ring_outs": float(endings[0].item()),
+            "inactivity_endings": float(endings[1].item()),
+            "numerical_failures": float(endings[2].item()),
         }
         if completed_returns:
             all_returns = torch.cat(completed_returns)
@@ -424,6 +437,10 @@ class BootstrapTrainer:
             summary["completed_red_return"] = float(all_returns[:, RED].mean().item())
             summary["completed_blue_return"] = float(all_returns[:, BLUE].mean().item())
             summary["completed_length"] = float(all_lengths.float().mean().item())
+        transition_count = self.config.num_envs * self.config.rollout_steps
+        for name, value in component_sums.items():
+            summary[f"reward/red/{name}"] = float((value[RED] / transition_count).item())
+            summary[f"reward/blue/{name}"] = float((value[BLUE] / transition_count).item())
         return finalize(red_storage, red_last), finalize(blue_storage, blue_last), state, summary
 
     def _update_population(
@@ -535,7 +552,8 @@ class BootstrapTrainer:
         for name, value in result.metrics.items():
             self.writer.add_scalar(f"validation/{name}", value, self.global_step)
         if result.video is not None:
-            self.writer.add_video(
+            add_tensorboard_video(
+                self.writer,
                 "validation/leader_match",
                 result.video,
                 self.global_step,

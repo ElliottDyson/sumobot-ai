@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .contracts import ACTION_DIM, DRIVEN_WHEEL_COUNT
+
 ONGOING = -2
 DRAW = -1
 RED = 0
@@ -26,10 +28,11 @@ class ArenaState:
     quaternion: torch.Tensor  # (B, 2, 4), xyzw
     linear_velocity: torch.Tensor  # (B, 2, 3), m/s
     angular_velocity: torch.Tensor  # (B, 2, 3), rad/s
-    wheel_velocity: torch.Tensor  # (B, 2, 4), rad/s
-    action_exec: torch.Tensor  # (B, 2, 4), normalized command actually executed
+    wheel_velocity: torch.Tensor  # (B, 2, 2), rad/s
+    action_exec: torch.Tensor  # (B, 2, 2), normalized command actually executed
     contact_force: torch.Tensor  # (B, 2, 3), N, net external contact summary
     edge_margin: torch.Tensor  # (B, 2), signed centre-to-edge margin, m
+    stationary_time_s: torch.Tensor  # (B, 2), continuous time below movement threshold
     time_remaining_s: torch.Tensor  # (B,)
 
     def __post_init__(self) -> None:
@@ -39,10 +42,11 @@ class ArenaState:
             "quaternion": (batch, 2, 4),
             "linear_velocity": (batch, 2, 3),
             "angular_velocity": (batch, 2, 3),
-            "wheel_velocity": (batch, 2, 4),
-            "action_exec": (batch, 2, 4),
+            "wheel_velocity": (batch, 2, DRIVEN_WHEEL_COUNT),
+            "action_exec": (batch, 2, ACTION_DIM),
             "contact_force": (batch, 2, 3),
             "edge_margin": (batch, 2),
+            "stationary_time_s": (batch, 2),
             "time_remaining_s": (batch,),
         }
         for name, expected in shapes.items():
@@ -66,6 +70,7 @@ class ArenaState:
             action_exec=self.action_exec.index_select(1, index),
             contact_force=self.contact_force.index_select(1, index),
             edge_margin=self.edge_margin.index_select(1, index),
+            stationary_time_s=self.stationary_time_s.index_select(1, index),
             time_remaining_s=self.time_remaining_s,
         )
 

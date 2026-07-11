@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
+from .contracts import ACTION_DIM, DRIVEN_WHEEL_COUNT
 from .domain_randomization import DomainBatch
 from .state import ArenaState
 
@@ -52,6 +53,7 @@ def build_teacher_observation(state: ArenaState, domain: DomainBatch, perspectiv
         ("self_contact_force", state.contact_force[:, perspective]),
         ("opponent_contact_force", state.contact_force[:, opponent]),
         ("edge_margins", state.edge_margin[:, [perspective, opponent]]),
+        ("stationary_time_s", state.stationary_time_s[:, [perspective, opponent]]),
         ("time_remaining_s", state.time_remaining_s.unsqueeze(-1)),
     ]
     for index, name in enumerate(domain_names):
@@ -61,29 +63,31 @@ def build_teacher_observation(state: ArenaState, domain: DomainBatch, perspectiv
 
 @dataclass(frozen=True, slots=True)
 class StudentSensors:
-    wheel_velocity: torch.Tensor  # (B, 4)
+    wheel_velocity: torch.Tensor  # (B, 2)
     imu_gyro: torch.Tensor  # (B, 3)
     imu_acceleration: torch.Tensor  # (B, 3)
     gravity_direction: torch.Tensor  # (B, 3)
     edge_ranges: torch.Tensor  # (B, 4)
     opponent_range_bearing_valid: torch.Tensor  # (B, 4): range, sin(bearing), cos(bearing), valid
-    previous_action_exec: torch.Tensor  # (B, 4)
+    previous_action_exec: torch.Tensor  # (B, 2)
     edge_sensor_age_s: torch.Tensor  # (B, 1)
     opponent_sensor_age_s: torch.Tensor  # (B, 1)
+    stationary_time_fraction: torch.Tensor  # (B, 1), locally tracked from deployable odometry
     time_fraction: torch.Tensor  # (B, 1)
 
     def __post_init__(self) -> None:
         batch = self.wheel_velocity.shape[0]
         expected = {
-            "wheel_velocity": (batch, 4),
+            "wheel_velocity": (batch, DRIVEN_WHEEL_COUNT),
             "imu_gyro": (batch, 3),
             "imu_acceleration": (batch, 3),
             "gravity_direction": (batch, 3),
             "edge_ranges": (batch, 4),
             "opponent_range_bearing_valid": (batch, 4),
-            "previous_action_exec": (batch, 4),
+            "previous_action_exec": (batch, ACTION_DIM),
             "edge_sensor_age_s": (batch, 1),
             "opponent_sensor_age_s": (batch, 1),
+            "stationary_time_fraction": (batch, 1),
             "time_fraction": (batch, 1),
         }
         for name, shape in expected.items():
@@ -107,6 +111,7 @@ def build_student_observation(sensors: StudentSensors) -> ObservationVector:
             ("previous_action_exec", sensors.previous_action_exec),
             ("edge_sensor_age_s", sensors.edge_sensor_age_s),
             ("opponent_sensor_age_s", sensors.opponent_sensor_age_s),
+            ("stationary_time_fraction", sensors.stationary_time_fraction),
             ("time_fraction", sensors.time_fraction),
         ]
     )

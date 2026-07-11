@@ -23,10 +23,11 @@ def make_state(batch: int = 4) -> ArenaState:
         quaternion=quaternion,
         linear_velocity=torch.zeros(batch, 2, 3),
         angular_velocity=torch.zeros(batch, 2, 3),
-        wheel_velocity=torch.zeros(batch, 2, 4),
-        action_exec=torch.zeros(batch, 2, 4),
+        wheel_velocity=torch.zeros(batch, 2, 2),
+        action_exec=torch.zeros(batch, 2, 2),
         contact_force=torch.zeros(batch, 2, 3),
         edge_margin=torch.ones(batch, 2),
+        stationary_time_s=torch.zeros(batch, 2),
         time_remaining_s=torch.full((batch,), 30.0),
     )
 
@@ -35,6 +36,10 @@ def test_arena_config_contract() -> None:
     config = ArenaConfig.load(ROOT / "configs/arena/flat_3x2.yaml")
     assert config.board.size_m == (3.0, 2.0)
     assert config.robot.chassis_size_m == (0.04, 0.04, 0.08)
+    assert config.robot.action_order == ("left_wheel", "right_wheel")
+    assert config.robot.skid_x_m < config.robot.wheel_axle_x_m
+    assert config.match.inactivity_timeout_s == 10.0
+    assert config.match.movement_confirmation_s == 0.2
     assert config.physics.backend == "mujoco_warp"
     assert config.physics.max_episode_steps == 1500
 
@@ -52,19 +57,20 @@ def test_privileged_and_student_observations_are_separate() -> None:
     zeros = lambda width: torch.zeros(4, width)  # noqa: E731 - compact tensor fixture
     student = build_student_observation(
         StudentSensors(
-            wheel_velocity=zeros(4),
+            wheel_velocity=zeros(2),
             imu_gyro=zeros(3),
             imu_acceleration=zeros(3),
             gravity_direction=zeros(3),
             edge_ranges=zeros(4),
             opponent_range_bearing_valid=zeros(4),
-            previous_action_exec=zeros(4),
+            previous_action_exec=zeros(2),
             edge_sensor_age_s=zeros(1),
             opponent_sensor_age_s=zeros(1),
+            stationary_time_fraction=zeros(1),
             time_fraction=zeros(1),
         )
     )
-    assert student.values.shape == (4, 28)
+    assert student.values.shape == (4, 25)
     assert not any("position" in name or name.startswith("domain.") for name in student.fields)
     assert teacher.values.shape[-1] > student.values.shape[-1]
 
