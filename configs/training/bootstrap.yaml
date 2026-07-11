@@ -23,7 +23,9 @@ leader_awac_max_weight: 20.0
 max_grad_norm: 1.0
 
 checkpoint_every_updates: 10
-validation_every_updates: 10
+# A full 30-second GIF validation takes roughly 100 seconds at this scale; every
+# 50 updates keeps video coverage useful without consuming ~24% of wall time.
+validation_every_updates: 50
 validation_envs: 16
 validation_seed: 2026
 validation_video_fps: 5

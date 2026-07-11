@@ -46,7 +46,7 @@ def test_bootstrap_training_config_loads() -> None:
     assert config.num_envs == 24_576
     assert config.rollout_steps == 16
     assert config.minibatch_size == 32_768
-    assert config.validation_every_updates == 10
+    assert config.validation_every_updates == 50
     assert config.device == "cuda:0"
 
 
