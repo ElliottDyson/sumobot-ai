@@ -330,7 +330,10 @@ class BootstrapTrainer:
         )
 
     def _load_checkpoint(self) -> None:
-        checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
+        # RNG generator state is serialized as CPU ByteTensors. Loading the
+        # entire checkpoint directly onto CUDA turns those into CUDA tensors,
+        # which torch.set_rng_state() correctly rejects during resume.
+        checkpoint = torch.load(self.checkpoint_path, map_location="cpu", weights_only=False)
         if int(checkpoint.get("version", -1)) != 2:
             raise ValueError("checkpoint predates the physical/sensor/history contract and cannot be resumed")
         expected = (self.arena_config.version, self.teacher_history_steps, self.red_model.observation_dim)
