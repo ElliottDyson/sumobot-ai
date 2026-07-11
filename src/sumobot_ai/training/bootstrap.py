@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -234,23 +235,10 @@ class BootstrapTrainer:
             awac_max_weight=float(cpo_config["awac_max_weight"]),
             awac_scale=0.0,
         )
-        self.validation: LeaderValidation | None = None
-        if training_config.validation_every_updates > 0:
-            validation_arena = NewtonSumoArena(
-                arena_config,
-                training_config.validation_envs,
-                device=training_config.device,
-                seed=training_config.validation_seed,
-            )
-            self.validation = LeaderValidation(
-                validation_arena,
-                arena_config,
-                reward_spec,
-                seed=training_config.validation_seed,
-                video_fps=training_config.validation_video_fps,
-                video_max_frames=training_config.validation_video_max_frames,
-                teacher_history_steps=self.teacher_history_steps,
-            )
+        # A second, persistent MuJoCo-Warp solver leaves too little headroom for
+        # the full 24,576-world collision pass. Validation arenas are therefore
+        # short lived and explicitly released after each video/metric rollout.
+        self.validation_enabled = training_config.validation_every_updates > 0
 
         self.global_step = 0
         self.update_index = 0
@@ -597,10 +585,31 @@ class BootstrapTrainer:
         self.writer.add_scalar("performance/update", self.update_index, self.global_step)
 
     def _run_validation(self) -> None:
-        if self.validation is None:
+        if not self.validation_enabled:
             return
         started = time.perf_counter()
-        result = self.validation.run(self.red_model, self.blue_model)
+        validation_arena = NewtonSumoArena(
+            self.arena_config,
+            self.config.validation_envs,
+            device=self.config.device,
+            seed=self.config.validation_seed,
+        )
+        validation = LeaderValidation(
+            validation_arena,
+            self.arena_config,
+            self.reward_spec,
+            seed=self.config.validation_seed,
+            video_fps=self.config.validation_video_fps,
+            video_max_frames=self.config.validation_video_max_frames,
+            teacher_history_steps=self.teacher_history_steps,
+        )
+        try:
+            result = validation.run(self.red_model, self.blue_model)
+        finally:
+            del validation
+            del validation_arena
+            gc.collect()
+            torch.cuda.empty_cache()
         for name, value in result.metrics.items():
             self.writer.add_scalar(f"validation/{name}", value, self.global_step)
         if result.video is not None:
@@ -617,7 +626,7 @@ class BootstrapTrainer:
     def run(self) -> None:
         state = self.arena.reset()
         history = TeacherObservationHistory(state, self.teacher_history_steps)
-        if self.validation is not None and self.global_step == 0:
+        if self.validation_enabled and self.global_step == 0:
             self._run_validation()
         try:
             while self.global_step < self.config.total_environment_steps and not self._stop_requested:
@@ -626,6 +635,11 @@ class BootstrapTrainer:
                 self.global_step += self.config.num_envs * self.config.rollout_steps
                 red_metrics = self._update_population(self.red_model, self.red_optimizer, red_rollout)
                 blue_metrics = self._update_population(self.blue_model, self.blue_optimizer, blue_rollout)
+                # PyTorch's cache otherwise retains the roughly gigabyte-sized
+                # rollout/update workspace and starves Warp's next collision
+                # pass, even though the rollout tensors are no longer live.
+                del red_rollout, blue_rollout
+                torch.cuda.empty_cache()
                 self.update_index += 1
                 elapsed = time.perf_counter() - started
                 fps = self.config.num_envs * self.config.rollout_steps / max(elapsed, 1e-6)
@@ -650,7 +664,7 @@ class BootstrapTrainer:
                 ):
                     self._save_checkpoint()
                 if (
-                    self.validation is not None
+                    self.validation_enabled
                     and self.config.validation_every_updates
                     and self.update_index % self.config.validation_every_updates == 0
                 ):
