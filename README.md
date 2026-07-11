@@ -75,7 +75,11 @@ python -m sumobot_ai train bootstrap --logdir runs/bootstrap
 tensorboard --logdir runs --host 127.0.0.1 --port 6006
 ```
 
-The red and blue CPO populations use separate parameters and optimizers. TensorBoard receives rollout outcomes,
+The red and blue CPO populations use separate parameters and optimizers while sharing the same 24,576 physical
+arenas. Each population has six policy-conditioning coefficient blocks, so every red policy and every blue policy
+controls exactly 4,096 robots per rollout (49,152 simultaneous agent instances in total). The checked-in production
+configuration uses the CPO reference geometry of a 16-step horizon and 32,768-sample minibatches; startup rejects a
+configuration whose arena count or horizon disagrees with that contract. TensorBoard receives rollout outcomes,
 per-population PPO/CPO losses, throughput, held-out leader-vs-leader metrics, and periodic top-down validation video.
 `SIGINT`, `SIGTERM`, or `SIGUSR1` requests a checkpoint after the current update; rerunning the command resumes from
 `checkpoint.pt` unless `--no-resume` is supplied.

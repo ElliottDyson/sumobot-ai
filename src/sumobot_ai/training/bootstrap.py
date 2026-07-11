@@ -72,6 +72,11 @@ class BootstrapTrainingConfig:
             raise ValueError("bootstrap sizes, steps, epochs, and video settings must be positive")
         if result.minibatch_size > result.num_envs * result.rollout_steps:
             raise ValueError("minibatch_size cannot exceed one flattened rollout")
+        rollout_batch = result.num_envs * result.rollout_steps
+        if rollout_batch % result.minibatch_size:
+            raise ValueError("one flattened rollout must be divisible by minibatch_size")
+        if result.total_environment_steps % rollout_batch:
+            raise ValueError("total_environment_steps must contain an exact number of rollout updates")
         if not 0 < result.gamma <= 1 or not 0 < result.gae_lambda <= 1:
             raise ValueError("gamma and gae_lambda must be in (0, 1]")
         if result.learning_rate <= 0 or result.max_grad_norm <= 0:
@@ -151,6 +156,28 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (value * weight).sum() / weight.sum().clamp_min(1.0)
 
 
+def validate_population_geometry(
+    training_config: BootstrapTrainingConfig, cpo_config: Mapping[str, Any]
+) -> tuple[int, int]:
+    population_size = int(cpo_config["population_size"])
+    block_size = int(cpo_config["expl_coef_block_size"])
+    rollout_horizon = int(cpo_config["rollout_horizon"])
+    if population_size <= 0 or block_size <= 0 or rollout_horizon <= 0:
+        raise ValueError("CPO population size, coefficient-block size, and rollout horizon must be positive")
+    expected_envs = population_size * block_size
+    if training_config.num_envs != expected_envs:
+        raise ValueError(
+            f"bootstrap CPO requires {population_size} coefficient blocks x {block_size} arenas "
+            f"= {expected_envs} arenas; got {training_config.num_envs}"
+        )
+    if training_config.rollout_steps != rollout_horizon:
+        raise ValueError(
+            f"training.rollout_steps={training_config.rollout_steps} does not match "
+            f"cpo.rollout_horizon={rollout_horizon}"
+        )
+    return population_size, block_size
+
+
 class BootstrapTrainer:
     def __init__(
         self,
@@ -175,6 +202,7 @@ class BootstrapTrainer:
         self._set_seeds(training_config.seed)
         if float(cpo_config.get("diversity_reward_coefficient", 0.0)) != 0.0:
             raise ValueError("the bootstrap runner currently requires diversity_reward_coefficient=0.0")
+        self.population_size, self.population_block_size = validate_population_geometry(training_config, cpo_config)
 
         self.arena = NewtonSumoArena(
             arena_config,
@@ -190,7 +218,6 @@ class BootstrapTrainer:
         observation_dim = build_teacher_observation(
             initial_state, self.arena.domain, RED, initial_history
         ).values.shape[-1]
-        self.population_size = int(cpo_config["population_size"])
         self.red_model = self._make_model(observation_dim)
         self.blue_model = self._make_model(observation_dim)
         if {id(parameter) for parameter in self.red_model.parameters()} & {
@@ -272,6 +299,8 @@ class BootstrapTrainer:
             "teacher_observation_dim": observation_dim,
             "teacher_history_steps": self.teacher_history_steps,
             "action_dim": ACTION_DIM,
+            "arenas_per_policy_per_population": self.population_block_size,
+            "simultaneous_agent_instances": self.config.num_envs * 2,
         }
         path = self.logdir / "run_config.json"
         path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")

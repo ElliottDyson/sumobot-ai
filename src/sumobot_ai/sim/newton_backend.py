@@ -5,7 +5,6 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 
 from ..config import ArenaConfig
@@ -166,13 +165,26 @@ class NewtonSumoArena:
             raise RuntimeError("wheel velocity actuators did not create joint_target_qd")
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-        self._base_body_mass = self.model.body_mass.numpy().copy()
-        self._base_body_inertia = self.model.body_inertia.numpy().copy()
-        self._base_body_com = self.model.body_com.numpy().copy()
-        self._base_joint_effort = self.model.joint_effort_limit.numpy().copy()
-        self._base_joint_target_kd = self.model.joint_target_kd.numpy().copy()
-        self._base_shape_ke = self.model.shape_material_ke.numpy().copy()
-        self._base_shape_kd = self.model.shape_material_kd.numpy().copy()
+        # Keep the immutable template values on the simulation device.  Episode
+        # resets are frequent in a large vectorized run; staging these arrays
+        # through NumPy made every partial reset copy and loop over every world.
+        self._base_body_mass = wp.to_torch(self.model.body_mass).reshape(world_count, self.BODIES_PER_WORLD).clone()
+        self._base_body_inertia = (
+            wp.to_torch(self.model.body_inertia).reshape(world_count, self.BODIES_PER_WORLD, 3, 3).clone()
+        )
+        self._base_body_com = wp.to_torch(self.model.body_com).reshape(world_count, self.BODIES_PER_WORLD, 3).clone()
+        self._base_joint_effort = (
+            wp.to_torch(self.model.joint_effort_limit).reshape(world_count, self.DOFS_PER_WORLD).clone()
+        )
+        self._base_joint_target_kd = (
+            wp.to_torch(self.model.joint_target_kd).reshape(world_count, self.DOFS_PER_WORLD).clone()
+        )
+        self._base_shape_ke = (
+            wp.to_torch(self.model.shape_material_ke).reshape(world_count, self.SHAPES_PER_WORLD).clone()
+        )
+        self._base_shape_kd = (
+            wp.to_torch(self.model.shape_material_kd).reshape(world_count, self.SHAPES_PER_WORLD).clone()
+        )
         max_delay = max(config.domain_randomization["action_latency_s"])
         self._history_length = math.ceil(max_delay / config.physics.control_dt) + 2
         self._action_history = torch.zeros(
@@ -336,94 +348,107 @@ class NewtonSumoArena:
             )
         builder.add_articulation(joints, label=f"{label}/robot")
 
-    def _replace_domain_rows(self, fresh: DomainBatch, mask: torch.Tensor) -> None:
-        values: dict[str, torch.Tensor] = {}
-        selector = mask.unsqueeze(-1)
+    def _replace_domain_rows(self, fresh: DomainBatch, indices: torch.Tensor) -> None:
+        if fresh.batch_size != indices.numel():
+            raise ValueError("fresh domain batch must contain exactly one row per reset world")
         for field in fields(DomainBatch):
-            old_value = getattr(self.domain, field.name)
-            new_value = getattr(fresh, field.name)
-            values[field.name] = torch.where(selector, new_value, old_value)
-        self.domain = DomainBatch(**values)
+            getattr(self.domain, field.name).index_copy_(0, indices, getattr(fresh, field.name))
 
-    def _apply_domain_parameters(self) -> None:
+    def _apply_domain_parameters(self, mask: torch.Tensor | None = None) -> None:
+        if mask is None:
+            indices = torch.arange(self.world_count, device=self.torch_device)
+        else:
+            indices = mask.nonzero(as_tuple=False).squeeze(-1)
+        if indices.numel() == 0:
+            return
+
         domain = self.domain
-        board_mu = domain.board_friction.detach().cpu().numpy()
-        chassis_mu = domain.chassis_friction.detach().cpu().numpy()
-        wheel_mu = domain.wheel_friction.detach().cpu().numpy()
-        skid_mu = domain.skid_friction.detach().cpu().numpy()
-        wheel_torsional = domain.wheel_torsional_friction.detach().cpu().numpy()
-        wheel_rolling = domain.wheel_rolling_friction.detach().cpu().numpy()
-        skid_torsional = domain.skid_torsional_friction.detach().cpu().numpy()
-        skid_rolling = domain.skid_rolling_friction.detach().cpu().numpy()
-        restitution_values = domain.restitution.detach().cpu().numpy()
-        shape_mu = self.model.shape_material_mu.numpy()
-        shape_torsional = self.model.shape_material_mu_torsional.numpy()
-        shape_rolling = self.model.shape_material_mu_rolling.numpy()
-        restitution = self.model.shape_material_restitution.numpy()
-        stiffness = self._base_shape_ke.copy()
-        damping = self._base_shape_kd.copy()
-        stiffness_scale = domain.contact_stiffness_scale.detach().cpu().numpy()
-        damping_scale = domain.contact_damping_scale.detach().cpu().numpy()
-        for world in range(self.world_count):
-            offset = world * self.SHAPES_PER_WORLD
-            shape_slice = slice(offset, offset + self.SHAPES_PER_WORLD)
-            stiffness[shape_slice] *= stiffness_scale[world, 0]
-            damping[shape_slice] *= damping_scale[world, 0]
-            shape_mu[offset] = board_mu[world, 0]
-            restitution[offset] = restitution_values[world, 0]
-            for robot in range(2):
-                shape_start = offset + 1 + robot * 4
-                shape_mu[shape_start] = chassis_mu[world, robot]
-                shape_mu[shape_start + 1] = skid_mu[world, robot]
-                shape_mu[shape_start + 2 : shape_start + 4] = wheel_mu[world, robot]
-                shape_torsional[shape_start + 1] = skid_torsional[world, robot]
-                shape_torsional[shape_start + 2 : shape_start + 4] = wheel_torsional[world, robot]
-                shape_rolling[shape_start + 1] = skid_rolling[world, robot]
-                shape_rolling[shape_start + 2 : shape_start + 4] = wheel_rolling[world, robot]
-                restitution[shape_start : shape_start + 4] = restitution_values[world, 0]
-        self.model.shape_material_mu.assign(shape_mu)
-        self.model.shape_material_mu_torsional.assign(shape_torsional)
-        self.model.shape_material_mu_rolling.assign(shape_rolling)
-        self.model.shape_material_restitution.assign(restitution)
-        self.model.shape_material_ke.assign(stiffness)
-        self.model.shape_material_kd.assign(damping)
+        shape_mu = wp.to_torch(self.model.shape_material_mu).reshape(self.world_count, self.SHAPES_PER_WORLD)
+        selected_mu = shape_mu.index_select(0, indices)
+        selected_mu[:, 0] = domain.board_friction[indices, 0]
+        selected_mu[:, (1, 5)] = domain.chassis_friction[indices]
+        selected_mu[:, (2, 6)] = domain.skid_friction[indices]
+        selected_mu[:, 3:5] = domain.wheel_friction[indices, 0:1]
+        selected_mu[:, 7:9] = domain.wheel_friction[indices, 1:2]
+        shape_mu.index_copy_(0, indices, selected_mu)
 
-        body_mass = self._base_body_mass.copy()
-        body_inertia = self._base_body_inertia.copy()
-        body_com = self._base_body_com.copy()
-        chassis_scale = domain.chassis_mass_scale.detach().cpu().numpy()
-        wheel_scale = domain.wheel_mass_scale.detach().cpu().numpy()
-        inertia_scale = domain.chassis_inertia_scale.detach().cpu().numpy()
-        com_x = domain.chassis_com_offset_x_m.detach().cpu().numpy()
-        com_y = domain.chassis_com_offset_y_m.detach().cpu().numpy()
-        com_z = domain.chassis_com_offset_z_m.detach().cpu().numpy()
-        for world in range(self.world_count):
-            body_offset = world * self.BODIES_PER_WORLD
-            for robot in range(2):
-                chassis_index = body_offset + robot * 3
-                body_mass[chassis_index] *= chassis_scale[world, robot]
-                body_inertia[chassis_index] *= chassis_scale[world, robot] * inertia_scale[world, robot]
-                body_com[chassis_index] += (com_x[world, robot], com_y[world, robot], com_z[world, robot])
-                wheel_slice = slice(chassis_index + 1, chassis_index + 3)
-                body_mass[wheel_slice] *= wheel_scale[world, robot]
-                body_inertia[wheel_slice] *= wheel_scale[world, robot]
-        self.model.body_mass.assign(body_mass)
-        self.model.body_inertia.assign(body_inertia)
-        self.model.body_com.assign(body_com)
-        self.model.body_inv_mass.assign(np.reciprocal(body_mass))
-        self.model.body_inv_inertia.assign(np.linalg.inv(body_inertia))
+        shape_torsional = wp.to_torch(self.model.shape_material_mu_torsional).reshape(
+            self.world_count, self.SHAPES_PER_WORLD
+        )
+        selected_torsional = shape_torsional.index_select(0, indices)
+        selected_torsional[:, (2, 6)] = domain.skid_torsional_friction[indices]
+        selected_torsional[:, 3:5] = domain.wheel_torsional_friction[indices, 0:1]
+        selected_torsional[:, 7:9] = domain.wheel_torsional_friction[indices, 1:2]
+        shape_torsional.index_copy_(0, indices, selected_torsional)
 
-        joint_effort = self._base_joint_effort.copy()
-        joint_target_kd = self._base_joint_target_kd.copy()
-        motor_scale = domain.motor_strength_scale.detach().cpu().numpy()
-        for world in range(self.world_count):
-            dof_offset = world * self.DOFS_PER_WORLD
-            for robot in range(2):
-                wheels = slice(dof_offset + robot * 8 + 6, dof_offset + robot * 8 + 8)
-                joint_effort[wheels] *= motor_scale[world, robot]
-                joint_target_kd[wheels] *= motor_scale[world, robot]
-        self.model.joint_effort_limit.assign(joint_effort)
-        self.model.joint_target_kd.assign(joint_target_kd)
+        shape_rolling = wp.to_torch(self.model.shape_material_mu_rolling).reshape(
+            self.world_count, self.SHAPES_PER_WORLD
+        )
+        selected_rolling = shape_rolling.index_select(0, indices)
+        selected_rolling[:, (2, 6)] = domain.skid_rolling_friction[indices]
+        selected_rolling[:, 3:5] = domain.wheel_rolling_friction[indices, 0:1]
+        selected_rolling[:, 7:9] = domain.wheel_rolling_friction[indices, 1:2]
+        shape_rolling.index_copy_(0, indices, selected_rolling)
+
+        restitution = wp.to_torch(self.model.shape_material_restitution).reshape(
+            self.world_count, self.SHAPES_PER_WORLD
+        )
+        restitution.index_copy_(0, indices, domain.restitution[indices].expand(-1, self.SHAPES_PER_WORLD))
+        stiffness = wp.to_torch(self.model.shape_material_ke).reshape(self.world_count, self.SHAPES_PER_WORLD)
+        damping = wp.to_torch(self.model.shape_material_kd).reshape(self.world_count, self.SHAPES_PER_WORLD)
+        stiffness.index_copy_(0, indices, self._base_shape_ke[indices] * domain.contact_stiffness_scale[indices])
+        damping.index_copy_(0, indices, self._base_shape_kd[indices] * domain.contact_damping_scale[indices])
+
+        chassis_columns = (0, 3)
+        wheel_columns = (1, 2, 4, 5)
+        chassis_scale = domain.chassis_mass_scale[indices]
+        wheel_scale = domain.wheel_mass_scale[indices].repeat_interleave(2, dim=-1)
+        body_mass = self._base_body_mass[indices].clone()
+        body_mass[:, chassis_columns] *= chassis_scale
+        body_mass[:, wheel_columns] *= wheel_scale
+        model_body_mass = wp.to_torch(self.model.body_mass).reshape(self.world_count, self.BODIES_PER_WORLD)
+        model_body_mass.index_copy_(0, indices, body_mass)
+        wp.to_torch(self.model.body_inv_mass).reshape(self.world_count, self.BODIES_PER_WORLD).index_copy_(
+            0, indices, body_mass.reciprocal()
+        )
+
+        body_inertia = self._base_body_inertia[indices].clone()
+        body_inertia[:, chassis_columns] *= (
+            (chassis_scale * domain.chassis_inertia_scale[indices]).unsqueeze(-1).unsqueeze(-1)
+        )
+        body_inertia[:, wheel_columns] *= wheel_scale.unsqueeze(-1).unsqueeze(-1)
+        wp.to_torch(self.model.body_inertia).reshape(self.world_count, self.BODIES_PER_WORLD, 3, 3).index_copy_(
+            0, indices, body_inertia
+        )
+        wp.to_torch(self.model.body_inv_inertia).reshape(self.world_count, self.BODIES_PER_WORLD, 3, 3).index_copy_(
+            0, indices, torch.linalg.inv(body_inertia)
+        )
+
+        body_com = self._base_body_com[indices].clone()
+        body_com[:, chassis_columns] += torch.stack(
+            (
+                domain.chassis_com_offset_x_m[indices],
+                domain.chassis_com_offset_y_m[indices],
+                domain.chassis_com_offset_z_m[indices],
+            ),
+            dim=-1,
+        )
+        wp.to_torch(self.model.body_com).reshape(self.world_count, self.BODIES_PER_WORLD, 3).index_copy_(
+            0, indices, body_com
+        )
+
+        wheel_dofs = (6, 7, 14, 15)
+        motor_scale = domain.motor_strength_scale[indices].repeat_interleave(2, dim=-1)
+        joint_effort = self._base_joint_effort[indices].clone()
+        joint_target_kd = self._base_joint_target_kd[indices].clone()
+        joint_effort[:, wheel_dofs] *= motor_scale
+        joint_target_kd[:, wheel_dofs] *= motor_scale
+        wp.to_torch(self.model.joint_effort_limit).reshape(self.world_count, self.DOFS_PER_WORLD).index_copy_(
+            0, indices, joint_effort
+        )
+        wp.to_torch(self.model.joint_target_kd).reshape(self.world_count, self.DOFS_PER_WORLD).index_copy_(
+            0, indices, joint_target_kd
+        )
         self.solver.notify_model_changed(
             newton.ModelFlags.SHAPE_PROPERTIES
             | newton.ModelFlags.BODY_INERTIAL_PROPERTIES
@@ -431,44 +456,34 @@ class NewtonSumoArena:
         )
 
     def _set_random_initial_coordinates(self, mask: torch.Tensor) -> None:
-        coordinates = self.state_0.joint_q.numpy()
-        mask_cpu = mask.detach().cpu().numpy()
+        indices = mask.nonzero(as_tuple=False).squeeze(-1)
+        if indices.numel() == 0:
+            return
+        coordinates = wp.to_torch(self.state_0.joint_q).reshape(self.world_count, self.COORDS_PER_WORLD)
+        selected = torch.zeros(
+            (indices.numel(), self.COORDS_PER_WORLD), dtype=coordinates.dtype, device=self.torch_device
+        )
         jitter_xy = self.config.initialization.position_jitter_m
         yaw_jitter = self.config.initialization.yaw_jitter_rad
         random_xy = (
-            (torch.rand((self.world_count, 2, 2), device=self.torch_device, generator=self.generator) * 2.0 - 1.0)
-            .cpu()
-            .numpy()
+            torch.rand((indices.numel(), 2, 2), device=self.torch_device, generator=self.generator).mul_(2.0).sub_(1.0)
         )
         random_yaw = (
-            (torch.rand((self.world_count, 2), device=self.torch_device, generator=self.generator) * 2.0 - 1.0)
-            .cpu()
-            .numpy()
+            torch.rand((indices.numel(), 2), device=self.torch_device, generator=self.generator).mul_(2.0).sub_(1.0)
         )
         base = (
             (self.config.initialization.red_position_m, self.config.initialization.red_yaw_rad),
             (self.config.initialization.blue_position_m, self.config.initialization.blue_yaw_rad),
         )
-        for world in range(self.world_count):
-            if not mask_cpu[world]:
-                continue
-            coordinate_offset = world * self.COORDS_PER_WORLD
-            for robot, (position, yaw) in enumerate(base):
-                free_start = coordinate_offset + robot * 9
-                coordinates[free_start : free_start + 3] = (
-                    position[0] + random_xy[world, robot, 0] * jitter_xy[0],
-                    position[1] + random_xy[world, robot, 1] * jitter_xy[1],
-                    position[2],
-                )
-                sampled_yaw = yaw + random_yaw[world, robot] * yaw_jitter
-                coordinates[free_start + 3 : free_start + 7] = (
-                    0.0,
-                    0.0,
-                    math.sin(sampled_yaw / 2.0),
-                    math.cos(sampled_yaw / 2.0),
-                )
-                coordinates[free_start + 7 : free_start + 9] = 0.0
-        self.state_0.joint_q.assign(coordinates)
+        for robot, (position, yaw) in enumerate(base):
+            free_start = robot * 9
+            selected[:, free_start] = position[0] + random_xy[:, robot, 0] * jitter_xy[0]
+            selected[:, free_start + 1] = position[1] + random_xy[:, robot, 1] * jitter_xy[1]
+            selected[:, free_start + 2] = position[2]
+            sampled_yaw = yaw + random_yaw[:, robot] * yaw_jitter
+            selected[:, free_start + 5] = torch.sin(sampled_yaw / 2.0)
+            selected[:, free_start + 6] = torch.cos(sampled_yaw / 2.0)
+        coordinates.index_copy_(0, indices, selected)
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
     def reset(self, mask: torch.Tensor | None = None) -> ArenaState:
@@ -478,9 +493,12 @@ class NewtonSumoArena:
             mask = mask.to(device=self.torch_device, dtype=torch.bool)
             if tuple(mask.shape) != (self.world_count,):
                 raise ValueError(f"reset mask must have shape ({self.world_count},)")
-        fresh = self.randomizer.sample(self.world_count, device=self.torch_device, generator=self.generator)
-        self._replace_domain_rows(fresh, mask)
-        self._apply_domain_parameters()
+        indices = mask.nonzero(as_tuple=False).squeeze(-1)
+        if indices.numel() == 0:
+            return self.snapshot()
+        fresh = self.randomizer.sample(indices.numel(), device=self.torch_device, generator=self.generator)
+        self._replace_domain_rows(fresh, indices)
+        self._apply_domain_parameters(mask)
         warp_mask = wp.from_torch(mask.contiguous(), dtype=wp.bool)
         self.solver.reset(self.state_0, world_mask=warp_mask)
         self._set_random_initial_coordinates(mask)

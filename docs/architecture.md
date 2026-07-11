@@ -100,7 +100,10 @@ performance. Here, `level` indexes frozen opponent snapshots rather than terrain
 
 Snapshots are ordered by held-out league rating and validation gates, not merely training step. A mixture of recent,
 historical, and exploitability-check opponents is retained to reduce forgetting and self-play cycles. During initial
-development, when no snapshot league exists, both live CPO populations play in every arena.
+development, when no snapshot league exists, both live CPO populations play in every one of 24,576 arenas. Each
+population contains six policy-conditioning coefficient blocks with 4,096 arenas per policy. Thus one arena count is
+shared by the two adversaries: there are 24,576 simultaneous matches and 49,152 independently controlled robots, not
+two disjoint sets of 24,576 matches.
 
 ## Teacher design and CAP-Dreamer bridge
 

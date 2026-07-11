@@ -2,15 +2,17 @@ version: 1
 seed: 42
 device: cuda:0
 
-# One environment step advances both robots, so this is the number of arena
-# transitions rather than the sum of red and blue agent transitions.
-num_envs: 256
-total_environment_steps: 10000000
-rollout_steps: 64
+# One environment step advances both robots, so this is the number of arenas,
+# not the 49,152 simultaneous red+blue agent instances. Each of the two
+# independent CPO populations has six 4,096-arena coefficient blocks.
+num_envs: 24576
+# 2,560 exact rollout updates (24,576 arenas x 16 transitions per update).
+total_environment_steps: 1006632960
+rollout_steps: 16
 
 learning_rate: 0.0003
 update_epochs: 4
-minibatch_size: 4096
+minibatch_size: 32768
 gamma: 0.995
 gae_lambda: 0.95
 value_coefficient: 0.5

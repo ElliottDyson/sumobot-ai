@@ -1,5 +1,8 @@
 version: 1
 population_size: 6
+# The official CPO large-scale layout assigns 4,096 vectorized environments to
+# each policy-conditioning coefficient block: 6 x 4,096 = 24,576 arenas.
+expl_coef_block_size: 4096
 policy_id_dim: 8
 # Ten 50 Hz samples provide 200 ms of self action/proprioception/opponent motion
 # context, matching Extreme Parkour's explicit finite-history design principle.
@@ -17,5 +20,5 @@ awac_max_weight: 20.0
 # Optional CPO-internal policy-ID bonus. Bootstrap's actual adversarial signal is win/loss.
 diversity_reward_coefficient: 0.0
 diversity_input: state_action
-rollout_horizon: 64
+rollout_horizon: 16
 update_epochs: 4
