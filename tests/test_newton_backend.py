@@ -20,5 +20,11 @@ def test_newton_mujoco_warp_smoke() -> None:
     assert result["worlds"] == 2
     assert result["mean_displacement_m"] > 0.02
     assert result["max_differential_yaw_rate_rad_s"] > 0.1
+    assert result["mean_normal_contact_force_n"] > 0.5
+    assert result["maximum_static_load_relative_error"] < 0.10
+    assert 0.0 <= result["first_step_executed_command_mean"] < 0.35
+    assert result["robot_envelope_size_m"] == [0.04, 0.04, 0.08]
+    assert result["student_observation_base_dim"] == 25
+    assert result["support_rule_verified"]
     assert 10.0 <= result["stationary_draw_after_s"] <= 15.0
     assert result["numerical_failures"] == 0

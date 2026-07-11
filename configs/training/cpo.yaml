@@ -1,6 +1,9 @@
 version: 1
 population_size: 6
 policy_id_dim: 8
+# Ten 50 Hz samples provide 200 ms of self action/proprioception/opponent motion
+# context, matching Extreme Parkour's explicit finite-history design principle.
+teacher_history_steps: 10
 teacher_frontend_units: [256, 256]
 actor_bottleneck: 256
 actor_suffix_layers: 2

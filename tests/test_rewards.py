@@ -27,9 +27,11 @@ def make_state(*, current: bool) -> ArenaState:
         linear_velocity=torch.zeros(batch, 2, 3),
         angular_velocity=torch.zeros(batch, 2, 3),
         wheel_velocity=torch.zeros(batch, 2, 2),
+        action_proposed=torch.full((batch, 2, 2), 0.25),
         action_exec=torch.full((batch, 2, 2), 0.25),
         contact_force=torch.zeros(batch, 2, 3),
         edge_margin=edge,
+        support_margin=edge,
         stationary_time_s=torch.zeros(batch, 2),
         time_remaining_s=torch.full((batch,), 9.98 if current else 10.0),
     )

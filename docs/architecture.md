@@ -19,15 +19,16 @@ The challenge has three distinct objectives which must not be conflated:
 
 - Coordinates are metres, seconds, kilograms, radians, and Newton uses `+z` as up.
 - The table is a finite `3 x 2 x 0.05 m` box whose top is at `z=0`.
-- The robot axis convention is `x=forward`, `y=left`, `z=up`, with a `40 x 40 mm` chassis footprint and `80 mm`
-  chassis height.
-- Each robot has one driven wheel on each side of a common axle and a low-friction passive rear skid.
+- The robot axis convention is `x=forward`, `y=left`, `z=up`. The complete external envelope, including wheels and
+  skid, is `40 x 40 x 80 mm`; the collision chassis is smaller so those appendages remain inside it.
+- Each robot has one driven wheel on each side of a common axle and a finite, low-friction passive rear skid pad.
 - Actions are two normalized wheel-velocity commands in `[left_wheel, right_wheel]` order.
-- The environment clips, latency-delays, and motor-scales an action before it reaches physics. The resulting
-  `action_exec`, rather than a policy proposal, is fed to recurrent state and replay.
+- The environment clips, latency-delays, deadband-corrects, quantizes, slew-limits, and first-order filters a command.
+  A torque-speed curve, battery scale, and left/right gain mismatch then govern the velocity actuators. The resulting
+  normalized `action_exec`, rather than the raw policy proposal, is fed to recurrent state and replay.
 - Control runs at 50 Hz with four MuJoCo-Warp substeps initially. Both are configuration values.
-- The provisional out rule is that a chassis centre crosses a board edge. Before a public challenge, replace or
-  ratify this with the society's physical rule and add golden tests.
+- A robot rings out after all three wheel/skid support projections remain outside the tabletop for `0.1 s`. Partial
+  support does not count as out; a simultaneous confirmed support loss is a draw.
 - A robot below `0.01 m/s` planar chassis speed for ten continuous seconds loses. Movement must remain above the
   threshold for `0.2 s` before it resets the timer, preventing a single solver-jitter or one-tick command spike from
   evading the rule. Physical movement, including being pushed, counts. If both timers expire on the same control
@@ -35,15 +36,18 @@ The challenge has three distinct objectives which must not be conflated:
 
 ## Observation boundary
 
-The teacher receives a fixed-order privileged vector containing both 3D poses, both 3D twists, wheel speeds,
-contact summaries, signed edge margins, time remaining, relative motion, and sampled domain parameters. It also
-receives the CPO policy identifier through the policy network, not through the physical observation.
+The teacher receives a fixed-order privileged vector containing both 3D poses, both 3D twists, wheel speeds, real
+MuJoCo-Warp contact-force summaries, centre and support edge margins, time remaining, relative motion, actuator state,
+and sampled domain parameters. It also receives ten 50 Hz samples (200 ms) of compact self action/proprioception and
+opponent-relative motion. Opponent private commands are deliberately excluded. The CPO policy identifier enters
+through the policy network, not through the physical observation.
 
-The student receives only a deployment-feasible sensor vector: wheel encoders, IMU angular velocity and
-acceleration, gravity direction, four edge sensors, an opponent range/bearing/valid tuple, previous executed action,
-sensor ages, and time remaining. This sensor suite is provisional because physical hardware was not specified. It
-is intentionally centralized in one schema so a later camera, lidar, or ToF decision changes one contract rather
-than leaking privileged state into training.
+The student receives only a deployment-feasible sensor vector: quantized wheel encoders, IMU angular velocity and
+specific force, gravity direction, four downward ray-based edge sensors, an FOV-limited opponent
+range/bearing/valid tuple, previous executed action, sensor ages, local inactivity state, and time remaining. Sensor
+rates, latency, bias, noise, and dropout are simulated. A ten-sample compact proprioceptive/action window accompanies
+the current packet, while CAP's RSSM supplies longer recurrent memory. The suite remains centralized so later physical
+sensor selection changes one versioned contract rather than leaking privileged state into training.
 
 Every exported student model is checked for privileged keys. Domain parameters may be auxiliary prediction targets
 but may not be actor inputs at deployment.
@@ -136,20 +140,25 @@ observation schema version, and simulator/domain-randomization version.
 
 ## Domain randomization
 
-Randomization is sampled per arena and per episode. The first ranges cover board, chassis, wheel, and skid friction;
-restitution; chassis and wheel mass; motor strength; action latency; encoder/IMU noise; and opponent-sensor dropout.
-Newton material changes are batched and followed by `SolverMuJoCo.notify_model_changed(...)`. Parameters are visible
-to the privileged teacher and dataset diagnostics, never directly to the deployed actor.
+Randomization is sampled per arena and per episode. Current physical ranges cover board/chassis/wheel/skid sliding,
+torsional, and rolling friction; restitution and contact stiffness/damping; chassis/wheel mass; COM offsets and
+inertia; motor strength, response time, deadband, left/right mismatch, battery voltage, and action latency. Sensor
+ranges cover encoder/IMU bias, noise and latency, edge-sensor noise/dropout/latency, and opponent-sensor
+range/bearing noise, dropout, and latency. Newton material and inertial changes are followed by
+`SolverMuJoCo.notify_model_changed(...)`. Sampled parameters are visible to the privileged teacher and diagnostics,
+never directly to the deployed actor.
 
-Later ranges should include centre-of-mass offsets, inertial tensors, voltage/battery effects, wheel eccentricity,
-motor deadband, controller jitter, sensor extrinsics, timestamp error, and external impulses. Randomization must be
-validated against plausible physical measurements rather than made arbitrarily wide.
+These are bounded starting distributions, not substitutes for system identification. Hardware acceptance must measure
+mass/COM/inertia, wheel speed and torque response, turn-in-place skid scrub, straight-line drift, encoder/IMU error,
+and sensor latency, then update and narrow the ranges. Wheel-radius/eccentricity and external-impulse experiments can
+be added once their physical distributions are known.
 
 ## Validation gates
 
-1. **Contract gate:** dimensions, units, action order, reset masks, out rule, reward symmetry, and observation leakage.
-2. **Physics gate:** finite rollouts, wheel direction, static stability, contact/friction response, and deterministic
-   reset on both CPU reference and GPU MuJoCo-Warp.
+1. **Contract gate:** external-envelope dimensions, units, action order, history/reset masks, support out rule, reward
+   symmetry, and observation leakage.
+2. **Physics gate:** finite rollouts, wheel direction, motor step response, straight/yaw kinematics, static stability,
+   measured contact load, skid scrub, and deterministic reset on GPU MuJoCo-Warp.
 3. **CPO gate:** old/new log-prob parity, mask coverage, leader/follower returns, KL, discriminator accuracy, and
    balanced red/blue matchup coverage.
 4. **Curriculum gate:** no mutable checkpoints, bounded levels, promotion/demotion hysteresis, and held-out rating

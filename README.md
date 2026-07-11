@@ -20,11 +20,17 @@ simulation model and `SolverMuJoCo` runs MuJoCo-Warp contact physics.
 - CPO-compatible actor, loss, and diversity-discriminator primitives with a CAP-compatible actor suffix.
 - A replay schema that keeps executed actions, teacher labels, environment rewards, and CPO diversity rewards separate.
 - A Newton/MuJoCo-Warp arena backend and CUDA/system diagnostics.
+- A legal-envelope two-wheel/skid rigid-body model with filtered torque-speed-limited motors, real contact summaries,
+  support-based ring-out, and delayed/noisy deployable sensors.
+- Ten-step proprioceptive/action histories for both the privileged CPO teacher interface and the deployable student,
+  with CAP's RSSM retaining its longer recurrent belief state.
 - An executable dual-population bootstrap trainer with checkpoints, TensorBoard metrics, and validation-match videos.
 
 The repository deliberately treats the robot dimensions and deployable sensor suite as versioned challenge
-contracts. The standardized chassis geometry is `40 mm` fore-aft, `40 mm` wide, and `80 mm` high. Policy actions are
-the normalized target velocities of the left and right driven wheels; the skid is passive.
+contracts. The complete robot—including wheels and skid—must fit the `40 mm` fore-aft, `40 mm` wide, and `80 mm`
+high envelope. Policy actions are the normalized target velocities of the left and right driven wheels; the finite
+rear skid pad is passive. Current inertial, motor, skid-material, and sensor values are measured-style starting
+estimates and must be replaced or narrowed using the standardized physical robot before sim-to-real deployment.
 
 ## Quick start
 
@@ -95,5 +101,6 @@ member CPO + custom reward ─────────────────�
 Bootstrap's primary adversarial signal is the literal zero-sum match outcome. In later member sessions, authored
 shaping affects their training but never tournament ranking. Ring-out takes precedence; otherwise, a robot that stays
 below the configured planar movement threshold for ten continuous seconds loses, with simultaneous inactivity scored
-as a draw. All non-outcome reward terms share a strict per-second cap, so their full-match contribution cannot
-overpower win/loss.
+as a draw. Ring-out means all three wheel/skid support projections have left the tabletop for the confirmation
+interval—not merely that the chassis centre crossed an edge. All non-outcome reward terms share a strict per-second
+cap, so their full-match contribution cannot overpower win/loss.

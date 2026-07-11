@@ -29,9 +29,11 @@ class ArenaState:
     linear_velocity: torch.Tensor  # (B, 2, 3), m/s
     angular_velocity: torch.Tensor  # (B, 2, 3), rad/s
     wheel_velocity: torch.Tensor  # (B, 2, 2), rad/s
+    action_proposed: torch.Tensor  # (B, 2, 2), normalized policy command before latency/actuator effects
     action_exec: torch.Tensor  # (B, 2, 2), normalized command actually executed
     contact_force: torch.Tensor  # (B, 2, 3), N, net external contact summary
     edge_margin: torch.Tensor  # (B, 2), signed centre-to-edge margin, m
+    support_margin: torch.Tensor  # (B, 2), max signed margin among the two wheels and skid, m
     stationary_time_s: torch.Tensor  # (B, 2), continuous time below movement threshold
     time_remaining_s: torch.Tensor  # (B,)
 
@@ -43,9 +45,11 @@ class ArenaState:
             "linear_velocity": (batch, 2, 3),
             "angular_velocity": (batch, 2, 3),
             "wheel_velocity": (batch, 2, DRIVEN_WHEEL_COUNT),
+            "action_proposed": (batch, 2, ACTION_DIM),
             "action_exec": (batch, 2, ACTION_DIM),
             "contact_force": (batch, 2, 3),
             "edge_margin": (batch, 2),
+            "support_margin": (batch, 2),
             "stationary_time_s": (batch, 2),
             "time_remaining_s": (batch,),
         }
@@ -67,9 +71,11 @@ class ArenaState:
             linear_velocity=self.linear_velocity.index_select(1, index),
             angular_velocity=self.angular_velocity.index_select(1, index),
             wheel_velocity=self.wheel_velocity.index_select(1, index),
+            action_proposed=self.action_proposed.index_select(1, index),
             action_exec=self.action_exec.index_select(1, index),
             contact_force=self.contact_force.index_select(1, index),
             edge_margin=self.edge_margin.index_select(1, index),
+            support_margin=self.support_margin.index_select(1, index),
             stationary_time_s=self.stationary_time_s.index_select(1, index),
             time_remaining_s=self.time_remaining_s,
         )

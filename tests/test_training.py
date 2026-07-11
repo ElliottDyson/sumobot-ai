@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _state() -> ArenaState:
-    position = torch.tensor([[[-0.5, 0.1, 0.046], [0.5, -0.1, 0.046]]])
+    position = torch.tensor([[[-0.5, 0.1, 0.043], [0.5, -0.1, 0.043]]])
     quaternion = torch.zeros(1, 2, 4)
     quaternion[..., 3] = 1.0
     return ArenaState(
@@ -25,9 +25,11 @@ def _state() -> ArenaState:
         linear_velocity=torch.zeros(1, 2, 3),
         angular_velocity=torch.zeros(1, 2, 3),
         wheel_velocity=torch.zeros(1, 2, 2),
+        action_proposed=torch.zeros(1, 2, 2),
         action_exec=torch.zeros(1, 2, 2),
         contact_force=torch.zeros(1, 2, 3),
         edge_margin=torch.ones(1, 2),
+        support_margin=torch.ones(1, 2),
         stationary_time_s=torch.zeros(1, 2),
         time_remaining_s=torch.tensor([12.5]),
     )

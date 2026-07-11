@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sumobot-ai"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reward-design and self-play infrastructure for the UBRobotics AI Sumobot challenge"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"

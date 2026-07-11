@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from ..config import ArenaConfig
 from ..contracts import ACTION_DIM
-from ..observations import build_teacher_observation
+from ..observations import TeacherObservationHistory, build_teacher_observation
 from ..rewards import RewardSpec, evaluate_reward
 from ..sim.newton_backend import NewtonSumoArena
 from ..state import BLUE, DRAW, RED, ArenaState, ArenaTransition
@@ -183,7 +183,13 @@ class BootstrapTrainer:
             seed=training_config.seed,
         )
         initial_state = self.arena.snapshot()
-        observation_dim = build_teacher_observation(initial_state, self.arena.domain, RED).values.shape[-1]
+        self.teacher_history_steps = int(cpo_config["teacher_history_steps"])
+        if self.teacher_history_steps <= 0:
+            raise ValueError("cpo.teacher_history_steps must be positive")
+        initial_history = TeacherObservationHistory(initial_state, self.teacher_history_steps)
+        observation_dim = build_teacher_observation(
+            initial_state, self.arena.domain, RED, initial_history
+        ).values.shape[-1]
         self.population_size = int(cpo_config["population_size"])
         self.red_model = self._make_model(observation_dim)
         self.blue_model = self._make_model(observation_dim)
@@ -216,6 +222,7 @@ class BootstrapTrainer:
                 seed=training_config.validation_seed,
                 video_fps=training_config.validation_video_fps,
                 video_max_frames=training_config.validation_video_max_frames,
+                teacher_history_steps=self.teacher_history_steps,
             )
 
         self.global_step = 0
@@ -256,12 +263,14 @@ class BootstrapTrainer:
 
     def _write_run_metadata(self, observation_dim: int) -> None:
         metadata = {
-            "arena": self.arena_config.name,
+            "arena_name": self.arena_config.name,
+            "arena": asdict(self.arena_config),
             "reward": self.reward_spec.canonical_dict(),
             "reward_spec_sha256": self.reward_spec.digest,
             "training": asdict(self.config),
             "cpo": self.cpo_config,
             "teacher_observation_dim": observation_dim,
+            "teacher_history_steps": self.teacher_history_steps,
             "action_dim": ACTION_DIM,
         }
         path = self.logdir / "run_config.json"
@@ -280,7 +289,10 @@ class BootstrapTrainer:
 
     def _save_checkpoint(self) -> None:
         checkpoint = {
-            "version": 1,
+            "version": 2,
+            "arena_config_version": self.arena_config.version,
+            "teacher_history_steps": self.teacher_history_steps,
+            "teacher_observation_dim": self.red_model.observation_dim,
             "global_step": self.global_step,
             "update_index": self.update_index,
             "red_model": self.red_model.state_dict(),
@@ -291,6 +303,7 @@ class BootstrapTrainer:
             "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "numpy_rng": np.random.get_state(),
             "python_rng": random.getstate(),
+            "arena_generator": self.arena.generator.get_state(),
         }
         temporary = self.checkpoint_path.with_suffix(".tmp")
         torch.save(checkpoint, temporary)
@@ -301,8 +314,16 @@ class BootstrapTrainer:
 
     def _load_checkpoint(self) -> None:
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
-        if int(checkpoint.get("version", -1)) != 1:
-            raise ValueError("unsupported bootstrap checkpoint version")
+        if int(checkpoint.get("version", -1)) != 2:
+            raise ValueError("checkpoint predates the physical/sensor/history contract and cannot be resumed")
+        expected = (self.arena_config.version, self.teacher_history_steps, self.red_model.observation_dim)
+        actual = (
+            int(checkpoint.get("arena_config_version", -1)),
+            int(checkpoint.get("teacher_history_steps", -1)),
+            int(checkpoint.get("teacher_observation_dim", -1)),
+        )
+        if actual != expected:
+            raise ValueError(f"checkpoint observation contract {actual} does not match current contract {expected}")
         self.red_model.load_state_dict(checkpoint["red_model"])
         self.blue_model.load_state_dict(checkpoint["blue_model"])
         self.red_optimizer.load_state_dict(checkpoint["red_optimizer"])
@@ -314,6 +335,7 @@ class BootstrapTrainer:
             torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
         np.random.set_state(checkpoint["numpy_rng"])
         random.setstate(checkpoint["python_rng"])
+        self.arena.generator.set_state(checkpoint["arena_generator"])
         print(f"resumed bootstrap training at step {self.global_step}, update {self.update_index}", flush=True)
 
     def _policy_ids(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -327,7 +349,7 @@ class BootstrapTrainer:
         return red, blue
 
     def _collect_rollout(
-        self, state: ArenaState
+        self, state: ArenaState, history: TeacherObservationHistory
     ) -> tuple[PopulationBatch, PopulationBatch, ArenaState, dict[str, float]]:
         red_policy_id, blue_policy_id = self._policy_ids()
         red_storage: dict[str, list[torch.Tensor]] = {
@@ -344,8 +366,8 @@ class BootstrapTrainer:
 
         for _ in range(self.config.rollout_steps):
             with torch.no_grad():
-                red_observation = build_teacher_observation(state, self.arena.domain, RED).values
-                blue_observation = build_teacher_observation(state, self.arena.domain, BLUE).values
+                red_observation = build_teacher_observation(state, self.arena.domain, RED, history).values
+                blue_observation = build_teacher_observation(state, self.arena.domain, BLUE, history).values
                 red_output = self.red_model(red_observation, red_policy_id)
                 blue_output = self.blue_model(blue_observation, blue_policy_id)
                 red_action = red_output.distribution.rsample()
@@ -392,13 +414,14 @@ class BootstrapTrainer:
                 state = self.arena.reset(physics.done)
             else:
                 state = physics.state
+            history.update(state, physics.done)
 
         with torch.no_grad():
             red_last = self.red_model(
-                build_teacher_observation(state, self.arena.domain, RED).values, red_policy_id
+                build_teacher_observation(state, self.arena.domain, RED, history).values, red_policy_id
             ).value
             blue_last = self.blue_model(
-                build_teacher_observation(state, self.arena.domain, BLUE).values, blue_policy_id
+                build_teacher_observation(state, self.arena.domain, BLUE, history).values, blue_policy_id
             ).value
 
         def finalize(storage: dict[str, list[torch.Tensor]], last_value: torch.Tensor) -> PopulationBatch:
@@ -564,12 +587,13 @@ class BootstrapTrainer:
 
     def run(self) -> None:
         state = self.arena.reset()
+        history = TeacherObservationHistory(state, self.teacher_history_steps)
         if self.validation is not None and self.global_step == 0:
             self._run_validation()
         try:
             while self.global_step < self.config.total_environment_steps and not self._stop_requested:
                 started = time.perf_counter()
-                red_rollout, blue_rollout, state, rollout_metrics = self._collect_rollout(state)
+                red_rollout, blue_rollout, state, rollout_metrics = self._collect_rollout(state, history)
                 self.global_step += self.config.num_envs * self.config.rollout_steps
                 red_metrics = self._update_population(self.red_model, self.red_optimizer, red_rollout)
                 blue_metrics = self._update_population(self.blue_model, self.blue_optimizer, blue_rollout)

@@ -1,6 +1,6 @@
 # ADR 0004: two-wheel drive, inactivity, and bounded guidance
 
-Status: accepted
+Status: accepted; physical geometry and ring-out details refined by ADR 0005
 
 The standardized robot has two independently driven side wheels and one passive rear skid. Its policy action is
 therefore exactly `[left_wheel_velocity, right_wheel_velocity]`; there is no steering or skid action. The skid is a

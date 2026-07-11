@@ -10,7 +10,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from ..config import ArenaConfig
-from ..observations import build_teacher_observation
+from ..observations import TeacherObservationHistory, build_teacher_observation
 from ..rewards import RewardSpec, evaluate_reward
 from ..state import BLUE, DRAW, RED, ArenaState, ArenaTransition
 
@@ -128,8 +128,8 @@ def render_top_down(
     quaternions = state.quaternion[arena_index].detach().cpu().numpy()
     colors = ((205, 50, 45), (40, 85, 205))
     # Preserve true centers/headings but make the tiny 40 mm footprint visible in TensorBoard.
-    display_length = max(config.robot.chassis_size_m[0], 0.08)
-    display_width = max(config.robot.chassis_size_m[1], 0.08)
+    display_length = max(config.robot.envelope_size_m[0], 0.08)
+    display_width = max(config.robot.envelope_size_m[1], 0.08)
     for side in (RED, BLUE):
         x, y = float(poses[side, 0]), float(poses[side, 1])
         yaw = _yaw_from_xyzw(quaternions[side])
@@ -170,8 +170,9 @@ class LeaderValidation:
         seed: int,
         video_fps: int,
         video_max_frames: int,
+        teacher_history_steps: int,
     ) -> None:
-        if video_fps <= 0 or video_max_frames <= 0:
+        if video_fps <= 0 or video_max_frames <= 0 or teacher_history_steps <= 0:
             raise ValueError("validation video settings must be positive")
         self.arena = arena
         self.arena_config = arena_config
@@ -179,6 +180,7 @@ class LeaderValidation:
         self.seed = seed
         self.video_fps = video_fps
         self.video_max_frames = video_max_frames
+        self.teacher_history_steps = teacher_history_steps
         self.capture_steps = validation_capture_steps(
             arena_config.physics.max_episode_steps,
             arena_config.physics.control_hz,
@@ -197,6 +199,7 @@ class LeaderValidation:
         blue_model.eval()
         self.arena.generator.manual_seed(self.seed)
         state = self.arena.reset()
+        history = TeacherObservationHistory(state, self.teacher_history_steps)
         count = self.arena.world_count
         device = state.position.device
         active = torch.ones(count, dtype=torch.bool, device=device)
@@ -208,8 +211,8 @@ class LeaderValidation:
         frames = [render_top_down(state, self.arena_config)]
 
         for step in range(self.arena_config.physics.max_episode_steps):
-            red_observation = build_teacher_observation(state, self.arena.domain, RED).values
-            blue_observation = build_teacher_observation(state, self.arena.domain, BLUE).values
+            red_observation = build_teacher_observation(state, self.arena.domain, RED, history).values
+            blue_observation = build_teacher_observation(state, self.arena.domain, BLUE, history).values
             red_action = red_model.leader(red_observation).distribution.mean
             blue_action = blue_model.leader(blue_observation).distribution.mean
             actions = torch.stack((red_action, blue_action), dim=1)
@@ -245,6 +248,7 @@ class LeaderValidation:
                 state = physics.state
                 break
             state = self.arena.reset(newly_done) if bool(newly_done.any()) else physics.state
+            history.update(state, newly_done)
 
         if red_was_training:
             red_model.train()

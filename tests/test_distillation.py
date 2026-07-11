@@ -18,8 +18,8 @@ from sumobot_ai.training.cpo import CapActorSuffix
 
 def replay_batch(batch: int = 5) -> dict[str, torch.Tensor]:
     return {
-        "student_obs": torch.zeros(batch, 25),
-        "privileged_obs": torch.zeros(batch, 71),
+        "student_obs": torch.zeros(batch, 155),
+        "privileged_obs": torch.zeros(batch, 295),
         "action_exec": torch.zeros(batch, 2),
         "action_student_raw": torch.zeros(batch, 2),
         "teacher_mean": torch.zeros(batch, 2),
@@ -36,7 +36,7 @@ def replay_batch(batch: int = 5) -> dict[str, torch.Tensor]:
         "is_first": torch.zeros(batch, 1, dtype=torch.bool),
         "is_last": torch.zeros(batch, 1, dtype=torch.bool),
         "is_terminal": torch.zeros(batch, 1, dtype=torch.bool),
-        "domain_parameters": torch.zeros(batch, 24),
+        "domain_parameters": torch.zeros(batch, 72),
         "sensor_age_s": torch.zeros(batch, 2),
         "sensor_valid": torch.ones(batch, 5, dtype=torch.bool),
         "timestamp_s": torch.arange(batch, dtype=torch.float32).unsqueeze(-1),

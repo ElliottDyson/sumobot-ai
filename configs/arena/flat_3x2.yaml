@@ -1,28 +1,41 @@
-version: 2
-name: flat_3x2_v1
+version: 3
+name: flat_3x2_v2
 
 board:
   size_m: [3.0, 2.0]
   thickness_m: 0.05
   top_z_m: 0.0
-  out_rule: center_crosses_edge
+  # A robot is out only once every wheel/skid support point has remained beyond
+  # the tabletop projection for the configured confirmation interval.
+  out_rule: support_lost
 
 robot:
-  # Axis convention: x=forward, y=left, z=up. The standardized envelope is
-  # 40 mm long, 40 mm wide, and 80 mm high.
-  chassis_size_m: [0.04, 0.04, 0.08]
+  # Axis convention: x=forward, y=left, z=up. This is the complete legal
+  # envelope, including wheels and skid—not merely the chassis collision box.
+  envelope_size_m: [0.04, 0.04, 0.08]
+  chassis_size_m: [0.04, 0.028, 0.074]
   chassis_mass_kg: 0.18
+  chassis_ground_clearance_m: 0.006
+  chassis_com_offset_m: [0.0, 0.0, 0.0]
+  # Measured values should replace these uniform-box starting estimates.
+  chassis_inertia_diagonal_kg_m2: [0.0000939, 0.00010614, 0.00003576]
   wheel_radius_m: 0.012
-  wheel_width_m: 0.006
+  wheel_half_width_m: 0.003
   wheel_mass_kg: 0.008
   # One independently driven wheel per side on a common axle, plus a passive
   # low-friction rear skid fixed to the chassis.
   wheel_axle_x_m: 0.006
-  track_m: 0.052
+  # 34 mm centre-to-centre track plus two 3 mm wheel half-widths = 40 mm.
+  track_m: 0.034
   skid_x_m: -0.014
-  skid_radius_m: 0.006
+  # A finite flat pad captures scrub/contact torque better than a point sphere.
+  skid_size_m: [0.008, 0.008, 0.002]
   max_wheel_speed_rad_s: 80.0
   max_wheel_torque_nm: 0.08
+  velocity_servo_gain: 0.02
+  motor_command_slew_per_s: 20.0
+  motor_command_quantization_levels: 255
+  motor_min_torque_fraction: 0.08
   action_order: [left_wheel, right_wheel]
 
 physics:
@@ -35,6 +48,27 @@ physics:
   gravity_m_s2: -9.81
   episode_seconds: 30.0
 
+sensors:
+  # CAP's RSSM remains recurrent; this finite window is an additional compact
+  # proprioceptive/action input, matching the released Extreme Parkour policy.
+  proprio_history_steps: 10
+  encoder_counts_per_revolution: 360
+  encoder_update_hz: 50
+  imu_update_hz: 50
+  edge_update_hz: 25
+  opponent_update_hz: 10
+  edge_max_range_m: 0.04
+  # Four downward-looking sensors near the legal-envelope corners, expressed in
+  # the chassis frame. Their ray/board intersection—not privileged edge margin—
+  # is provided to the deployable policy.
+  edge_sensor_positions_m:
+    - [0.016, 0.016, -0.036]
+    - [0.016, -0.016, -0.036]
+    - [-0.016, 0.016, -0.036]
+    - [-0.016, -0.016, -0.036]
+  opponent_max_range_m: 3.7
+  opponent_horizontal_fov_rad: 4.71238898038469
+
 match:
   # A robot that remains below this planar chassis speed continuously for ten
   # seconds loses. If both timers expire together, the result is a draw.
@@ -42,11 +76,12 @@ match:
   movement_speed_threshold_m_s: 0.01
   # A one-tick velocity spike does not reset ten seconds of inactivity.
   movement_confirmation_s: 0.2
+  ring_out_confirmation_s: 0.1
 
 initialization:
-  red_position_m: [-0.6, 0.0, 0.046]
+  red_position_m: [-0.6, 0.0, 0.043]
   red_yaw_rad: 0.0
-  blue_position_m: [0.6, 0.0, 0.046]
+  blue_position_m: [0.6, 0.0, 0.043]
   blue_yaw_rad: 3.141592653589793
   position_jitter_m: [0.08, 0.08]
   yaw_jitter_rad: 0.15
@@ -56,12 +91,37 @@ domain_randomization:
   chassis_friction: [0.35, 0.85]
   wheel_friction: [0.65, 1.40]
   skid_friction: [0.10, 0.35]
+  wheel_torsional_friction: [0.001, 0.006]
+  wheel_rolling_friction: [0.00002, 0.00050]
+  skid_torsional_friction: [0.002, 0.020]
+  skid_rolling_friction: [0.00010, 0.00100]
   restitution: [0.0, 0.12]
+  contact_stiffness_scale: [0.70, 1.30]
+  contact_damping_scale: [0.70, 1.30]
   chassis_mass_scale: [0.85, 1.15]
   wheel_mass_scale: [0.85, 1.15]
+  chassis_inertia_scale: [0.80, 1.20]
+  chassis_com_offset_x_m: [-0.003, 0.003]
+  chassis_com_offset_y_m: [-0.002, 0.002]
+  chassis_com_offset_z_m: [-0.004, 0.004]
   motor_strength_scale: [0.80, 1.20]
+  motor_time_constant_s: [0.025, 0.075]
+  motor_deadband: [0.01, 0.06]
+  motor_asymmetry: [-0.06, 0.06]
+  battery_voltage_scale: [0.85, 1.10]
   action_latency_s: [0.0, 0.035]
   encoder_noise_std_rad_s: [0.0, 0.8]
+  encoder_bias_std_rad_s: [0.0, 0.25]
+  encoder_latency_s: [0.0, 0.02]
   imu_gyro_noise_std_rad_s: [0.0, 0.03]
+  imu_gyro_bias_std_rad_s: [0.0, 0.015]
   imu_accel_noise_std_m_s2: [0.0, 0.12]
+  imu_accel_bias_std_m_s2: [0.0, 0.08]
+  imu_latency_s: [0.0, 0.02]
+  edge_range_noise_std_m: [0.0, 0.0015]
+  edge_sensor_latency_s: [0.02, 0.06]
+  edge_sensor_dropout: [0.0, 0.03]
+  opponent_range_noise_std_m: [0.0, 0.025]
+  opponent_bearing_noise_std_rad: [0.0, 0.025]
+  opponent_sensor_latency_s: [0.04, 0.12]
   opponent_sensor_dropout: [0.0, 0.08]
