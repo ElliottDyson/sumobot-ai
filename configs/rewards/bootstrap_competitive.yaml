@@ -1,0 +1,17 @@
+version: 1
+name: bootstrap_competitive_v0
+description: Shared zero-sum outcome reward for the two live CPO populations during bootstrap.
+clip: [-4.0, 4.0]
+terms:
+  - name: win_loss
+    weight: 3.0
+  - name: push_opponent_to_edge
+    weight: 0.5
+    params:
+      scale_m: 1.0
+      discount: 1.0
+  - name: protect_own_edge
+    weight: 0.2
+    params:
+      scale_m: 1.0
+      discount: 1.0

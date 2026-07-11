@@ -1,0 +1,11 @@
+version: 1
+window_size: 24
+min_results: 12
+promotion_win_rate: 0.70
+demotion_win_rate: 0.30
+neighbor_probabilities:
+  easier: 0.15
+  current: 0.70
+  harder: 0.15
+max_level: 12
+draw_score: 0.5

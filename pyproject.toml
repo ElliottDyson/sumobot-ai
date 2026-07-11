@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sumobot-ai"
+version = "0.1.0"
+description = "Reward-design and self-play infrastructure for the UBRobotics AI Sumobot challenge"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "UBRobotics Society" }]
+dependencies = [
+  "numpy>=1.26,<3",
+  "PyYAML>=6.0.2,<7",
+  "Pillow>=11,<13",
+  "moviepy>=1.0.3,<2",
+  "tensorboard>=2.20,<3",
+  "torch>=2.7,<2.12",
+]
+
+[project.optional-dependencies]
+sim = [
+  "newton[sim] @ git+https://github.com/newton-physics/newton.git@82526c0aa7322569de4faf461b0db87b294a8117",
+]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+sumobot-ai = "sumobot_ai.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sumobot_ai"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "gpu: requires an NVIDIA GPU and CUDA driver",
+  "sim: requires the optional Newton/MuJoCo-Warp stack",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

@@ -1,0 +1,54 @@
+version: 1
+name: flat_3x2_v0
+
+board:
+  size_m: [3.0, 2.0]
+  thickness_m: 0.05
+  top_z_m: 0.0
+  out_rule: center_crosses_edge
+
+robot:
+  # Axis convention: x=forward, y=left, z=up. The standardized envelope is
+  # 40 mm long, 40 mm wide, and 80 mm high.
+  chassis_size_m: [0.04, 0.04, 0.08]
+  chassis_mass_kg: 0.18
+  wheel_radius_m: 0.012
+  wheel_width_m: 0.006
+  wheel_mass_kg: 0.008
+  wheelbase_m: 0.032
+  track_m: 0.052
+  max_wheel_speed_rad_s: 80.0
+  max_wheel_torque_nm: 0.08
+  action_order: [front_left, front_right, rear_left, rear_right]
+
+physics:
+  backend: mujoco_warp
+  control_hz: 50
+  substeps: 4
+  solver_iterations: 8
+  solver_ls_iterations: 20
+  use_mujoco_contacts: true
+  gravity_m_s2: -9.81
+  episode_seconds: 30.0
+
+initialization:
+  red_position_m: [-0.6, 0.0, 0.046]
+  red_yaw_rad: 0.0
+  blue_position_m: [0.6, 0.0, 0.046]
+  blue_yaw_rad: 3.141592653589793
+  position_jitter_m: [0.08, 0.08]
+  yaw_jitter_rad: 0.15
+
+domain_randomization:
+  board_friction: [0.55, 1.15]
+  chassis_friction: [0.35, 0.85]
+  wheel_friction: [0.65, 1.40]
+  restitution: [0.0, 0.12]
+  chassis_mass_scale: [0.85, 1.15]
+  wheel_mass_scale: [0.85, 1.15]
+  motor_strength_scale: [0.80, 1.20]
+  action_latency_s: [0.0, 0.035]
+  encoder_noise_std_rad_s: [0.0, 0.8]
+  imu_gyro_noise_std_rad_s: [0.0, 0.03]
+  imu_accel_noise_std_m_s2: [0.0, 0.12]
+  opponent_sensor_dropout: [0.0, 0.08]

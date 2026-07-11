@@ -1,0 +1,18 @@
+version: 1
+population_size: 6
+policy_id_dim: 8
+teacher_frontend_units: [256, 256]
+actor_bottleneck: 256
+actor_suffix_layers: 2
+actor_units: 256
+actor_min_std: 0.1
+actor_max_std: 1.0
+ppo_clip: 0.2
+lambda_follower_kl: 0.1
+lambda_awac: 1.0
+awac_max_weight: 20.0
+# Optional CPO-internal policy-ID bonus. Bootstrap's actual adversarial signal is win/loss.
+diversity_reward_coefficient: 0.0
+diversity_input: state_action
+rollout_horizon: 64
+update_epochs: 4

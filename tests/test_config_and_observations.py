@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import torch
+
+from sumobot_ai.config import ArenaConfig
+from sumobot_ai.domain_randomization import DomainRandomizer
+from sumobot_ai.observations import StudentSensors, build_student_observation, build_teacher_observation
+from sumobot_ai.state import ArenaState
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def make_state(batch: int = 4) -> ArenaState:
+    position = torch.zeros(batch, 2, 3)
+    position[:, 0, 0] = -0.5
+    position[:, 1, 0] = 0.5
+    quaternion = torch.zeros(batch, 2, 4)
+    quaternion[..., 3] = 1.0
+    return ArenaState(
+        position=position,
+        quaternion=quaternion,
+        linear_velocity=torch.zeros(batch, 2, 3),
+        angular_velocity=torch.zeros(batch, 2, 3),
+        wheel_velocity=torch.zeros(batch, 2, 4),
+        action_exec=torch.zeros(batch, 2, 4),
+        contact_force=torch.zeros(batch, 2, 3),
+        edge_margin=torch.ones(batch, 2),
+        time_remaining_s=torch.full((batch,), 30.0),
+    )
+
+
+def test_arena_config_contract() -> None:
+    config = ArenaConfig.load(ROOT / "configs/arena/flat_3x2.yaml")
+    assert config.board.size_m == (3.0, 2.0)
+    assert config.robot.chassis_size_m == (0.04, 0.04, 0.08)
+    assert config.physics.backend == "mujoco_warp"
+    assert config.physics.max_episode_steps == 1500
+
+
+def test_privileged_and_student_observations_are_separate() -> None:
+    config = ArenaConfig.load(ROOT / "configs/arena/flat_3x2.yaml")
+    domain = DomainRandomizer(config.domain_randomization).sample(4, generator=torch.Generator().manual_seed(3))
+    teacher = build_teacher_observation(make_state(), domain, perspective=0)
+    assert "self_position" in teacher.fields
+    assert "opponent_position" in teacher.fields
+    assert any(name.startswith("domain.") for name in teacher.fields)
+    assert teacher.values.shape == (4, 71)
+    assert all(field.stop > field.start for name, field in teacher.fields.items() if name.startswith("domain."))
+
+    zeros = lambda width: torch.zeros(4, width)  # noqa: E731 - compact tensor fixture
+    student = build_student_observation(
+        StudentSensors(
+            wheel_velocity=zeros(4),
+            imu_gyro=zeros(3),
+            imu_acceleration=zeros(3),
+            gravity_direction=zeros(3),
+            edge_ranges=zeros(4),
+            opponent_range_bearing_valid=zeros(4),
+            previous_action_exec=zeros(4),
+            edge_sensor_age_s=zeros(1),
+            opponent_sensor_age_s=zeros(1),
+            time_fraction=zeros(1),
+        )
+    )
+    assert student.values.shape == (4, 28)
+    assert not any("position" in name or name.startswith("domain.") for name in student.fields)
+    assert teacher.values.shape[-1] > student.values.shape[-1]
+
+
+def test_domain_samples_respect_ranges() -> None:
+    config = ArenaConfig.load(ROOT / "configs/arena/flat_3x2.yaml")
+    batch = DomainRandomizer(config.domain_randomization).sample(128, generator=torch.Generator().manual_seed(11))
+    for name, bounds in config.domain_randomization.items():
+        value = getattr(batch, name)
+        assert float(value.min()) >= bounds[0]
+        assert float(value.max()) <= bounds[1]

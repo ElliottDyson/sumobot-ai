@@ -1,0 +1,26 @@
+version: 1
+name: baseline_v0
+description: Conservative starter reward; tournament scoring is not derived from this file.
+clip: [-5.0, 5.0]
+terms:
+  - name: win_loss
+    weight: 3.0
+  - name: approach_opponent
+    weight: 0.35
+    params:
+      scale_m: 1.0
+      discount: 1.0
+  - name: push_opponent_to_edge
+    weight: 0.7
+    params:
+      scale_m: 1.0
+      discount: 1.0
+  - name: protect_own_edge
+    weight: 0.25
+    params:
+      scale_m: 1.0
+      discount: 1.0
+  - name: face_opponent
+    weight: 0.015
+  - name: action_energy
+    weight: 0.002

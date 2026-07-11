@@ -1,0 +1,28 @@
+version: 1
+seed: 42
+device: cuda:0
+
+# One environment step advances both robots, so this is the number of arena
+# transitions rather than the sum of red and blue agent transitions.
+num_envs: 256
+total_environment_steps: 10000000
+rollout_steps: 64
+
+learning_rate: 0.0003
+update_epochs: 4
+minibatch_size: 4096
+gamma: 0.995
+gae_lambda: 0.95
+value_coefficient: 0.5
+entropy_coefficient: 0.001
+leader_awac_coefficient: 0.10
+leader_awac_temperature: 1.0
+leader_awac_max_weight: 20.0
+max_grad_norm: 1.0
+
+checkpoint_every_updates: 10
+validation_every_updates: 10
+validation_envs: 16
+validation_seed: 2026
+validation_video_fps: 10
+validation_video_max_frames: 150

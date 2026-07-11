@@ -1,0 +1,7 @@
+version: 1
+name: sparse_v0
+description: Sparse control reward for a key ablation.
+clip: [-3.0, 3.0]
+terms:
+  - name: win_loss
+    weight: 3.0
